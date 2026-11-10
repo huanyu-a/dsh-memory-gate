@@ -42,10 +42,13 @@ test('drops the stale lockfile record for the file: dependency', () => {
   assert.match(source, /cannot force a re-extract safely/, 'expected a hard failure when no lockfile record matches')
 })
 
-test('verifies the landed build byte for byte', () => {
-  assert.match(source, /readFileSync\(join\(resolve\('lib'\),\s*'index\.js'\)/, 'expected a read of the local build')
-  assert.match(source, /readFileSync\(installedEntry/, 'expected a read of the installed entry')
-  assert.match(source, /fresh !== landed/, 'expected a byte comparison between build and installation')
+test('verifies every installed file, not just the host entry', () => {
+  // The client bundle renders the card and the dropdown; a fresh host running
+  // against a stale client would still "pass" a host-only check. `pnpm` also
+  // preserves tarball mtimes, so content is the only reliable signal.
+  assert.match(source, /const builtFiles = walk\(builtLib\)/, 'expected a walk of the built lib directory')
+  assert.match(source, /readFileSync\(join\(builtLib, file\)\)\.equals/, 'expected a per-file content comparison')
+  assert.match(source, /verified \$\{String\(builtFiles\.length\)\} file\(s\) byte for byte/, 'expected the count to be reported')
 })
 
 test('refuses an installation that would resolve its own dependencies', () => {

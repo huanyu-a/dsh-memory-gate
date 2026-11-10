@@ -23,8 +23,8 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join, relative, resolve } from 'node:path'
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const args = process.argv.slice(2)
@@ -179,16 +179,35 @@ execFileSync(nodeExe, [pnpmCjs, 'install', '--ignore-scripts', '--config.confirm
 })
 
 // ---- step 6: prove the installed tree is the build we just made ---------
+// Compare every emitted file, not just the host entry: the client bundle is
+// what renders the card and the per-model dropdown, and a stale `lib/client.js`
+// with a fresh `lib/index.js` would run a host the UI cannot talk to. A stale
+// entry can only be caught by content, because pnpm preserves tarball mtimes.
+const builtLib = resolve('lib')
+const installedLib = join(target, 'lib')
+if (!existsSync(join(installedLib, 'index.js'))) fail(`install finished but ${installedLib}/index.js is missing`)
 
-const installedEntry = join(target, 'lib', 'index.js')
-if (!existsSync(installedEntry)) fail(`install finished but ${installedEntry} is missing`)
-
-const fresh = readFileSync(join(resolve('lib'), 'index.js'), 'utf8')
-const landed = readFileSync(installedEntry, 'utf8')
-if (fresh !== landed) {
+const walk = (dir, base = dir, out = []) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) walk(path, base, out)
+    else out.push(relative(base, path))
+  }
+  return out
+}
+const builtFiles = walk(builtLib)
+const stale = []
+for (const file of builtFiles) {
+  const landedPath = join(installedLib, file)
+  if (!existsSync(landedPath) || !readFileSync(join(builtLib, file)).equals(readFileSync(landedPath))) {
+    stale.push(file)
+  }
+}
+if (stale.length > 0) {
   fail(
-    'the installed lib/index.js differs from the local build — pnpm almost certainly reused a cached ' +
-      `extraction. Remove ${target} and re-run.`,
+    `the installed lib/ differs from the local build in ${String(stale.length)} file(s): ` +
+      `${stale.slice(0, 5).join(', ')}${stale.length > 5 ? '…' : ''} — pnpm almost certainly reused a ` +
+      `cached extraction. Remove ${target} and re-run.`,
   )
 }
 if (existsSync(join(target, 'node_modules'))) {
@@ -198,5 +217,6 @@ if (existsSync(join(target, 'node_modules'))) {
   )
 }
 
+console.log(`install-profile: verified ${String(builtFiles.length)} file(s) byte for byte`)
 console.log(`install-profile: OK — ${pkg.name}@${pkg.version} installed into ${profile}`)
 console.log('install-profile: restart the DSH desktop app to load it.')
