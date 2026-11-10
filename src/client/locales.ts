@@ -1,0 +1,143 @@
+/**
+ * Copy dictionaries for the browser half, keyed by locale. The union type is
+ * derived from the English dictionary; the Chinese dictionary must cover
+ * exactly the same keys (compile-time checked).
+ *
+ * @module dsh-memory-gate/client/locales
+ */
+
+const en = {
+  // ---- Plugin-configuration card ----
+  cardTitle: 'Memory gate',
+  cardDescription: 'Decide per model and per session whether a request carries a memory identity.',
+  proxyNote: 'Only requests whose provider base URL points at the TDAI memory proxy (:8096, or a tdai/memory host) are touched at all: that is the route that claims a conversation once it sees identity headers. Every other route is left byte-identical — no header added, changed or removed.',
+  pinnedNote: 'A session pins its choice on its first request, so configuration edits affect new sessions only and an open session keeps what it started with. That is why the Models page picker needs no "apply now" control.',
+  detachNote: '"Detach" sends no identity header at all: the proxy records that session as bypassed, and that state is terminal — no injection and no L0 writes for the rest of that session.',
+  sectionIdentities: 'Memory identities',
+  sectionDefaults: 'Default and header names',
+  sectionPolicy: 'Session and budget',
+  identityId: 'Identity ID',
+  identityIdPlaceholder: 'Identity ID, e.g. worker',
+  teamValue: 'Team ID',
+  teamPlaceholder: 'Sent as x-team-id; empty means the header is omitted',
+  agentValue: 'Agent ID',
+  agentPlaceholder: 'Sent as x-agent-id; may be empty',
+  taskValue: 'Task ID',
+  taskPlaceholder: 'Sent as x-task-id; may be empty',
+  addIdentity: 'Add identity',
+  removeIdentity: 'Delete identity',
+  expandIdentity: 'Show identity',
+  collapseIdentity: 'Hide identity',
+  identityUntitled: '(unnamed identity)',
+  headerName: 'Header name',
+  headerValue: 'Value',
+  addHeader: 'Add header',
+  removeHeader: 'Remove header',
+  emptyIdentities: 'No memory identity yet. Add one, then pick it for a model on the Models page; without an identity a request runs detached.',
+  issueIdEmpty: 'Identity ID is required.',
+  issueIdDuplicate: 'Identity ID must be unique (case-insensitive).',
+  issueTeamEmpty: 'Team ID is required: without a team the proxy treats the request as unidentified and can never inject memory.',
+  issueNameEmpty: 'Header name is required when a value is set.',
+  issueNameInvalid: 'This header name is not representable as an HTTP header.',
+  issueValueInvalid: 'This header value is not representable as an HTTP header.',
+  defaultIdentity: 'Default identity',
+  defaultIdentityNone: 'No identity at all (models without their own identity run detached)',
+  issueDefaultMissing: 'The default identity names an ID that is not in the list.',
+  headerNamesTitle: 'Identity header names',
+  headerTeamName: 'Team header',
+  headerAgentName: 'Agent header',
+  headerTaskName: 'Task header',
+  issueHeaderNameEmpty: 'Header name is required.',
+  issueHeaderNameInvalid: 'This header name is not representable as an HTTP header.',
+  budgetEnabled: 'Enable the budget gate',
+  budgetTokens: 'Per-request ceiling (estimated tokens)',
+  budgetHint: 'A session whose first request is estimated above this ceiling runs detached (and pins that). The estimate is coarse — a guard rail, not a tokenizer.',
+  issueBudget: 'The ceiling must be a positive whole number.',
+  sessionHeader: 'Send the session header',
+  sessionHeaderHint: 'Adds x-deepseek-harness-session-id so the proxy keys this whole DSH session as one conversation instead of starting a new one every turn.',
+  unsaved: 'Unsaved',
+  save: 'Save',
+  saving: 'Saving…',
+  discard: 'Discard',
+  saveFailed: 'The deployment did not accept these values; they were left for you to correct.',
+  readOnly: 'This settings document is read-only in the current deployment.',
+  // ---- Models-page per-model picker ----
+  modelPicker: 'Memory identity',
+  modelPickerDefault: 'Default (follow the default identity)',
+  modelPickerDetached: 'Detach (no identity header)',
+  modelPickerSaveFirst: 'Save this provider before picking a memory identity.',
+  modelPickerWriteFailed: 'Could not save the memory identity pick',
+} as const
+
+/** Union of every dictionary key. */
+export type MgKey = keyof typeof en
+
+/**
+ * Translate face bound to this dictionary's namespace. The slot renderer and
+ * `ctx.locale.bind()` hand out exactly this shape; declared once here so the
+ * card and its sub-components share one signature.
+ */
+export type CardTranslate = (key: MgKey, params?: Record<string, unknown>) => string
+
+const zh: Record<MgKey, string> = {
+  cardTitle: '记忆闸门',
+  cardDescription: '按模型、按会话决定这次请求要不要带记忆身份。',
+  proxyNote: '只有 provider baseURL 指向 TDAI 记忆代理（:8096，或 tdai / memory 主机）的请求才会被处理：那是见到身份头才会认领会话的那条通路。其它路由原样不动——不加、不改、不删任何一个头。',
+  pinnedNote: '会话在第一笔请求上就把选择钉住了，所以改配置只影响新会话，已经开着的会话保持原样。这也是「模型」页那个下拉框不需要「立即生效」按钮的原因。',
+  detachNote: '「摘链」= 一个身份头都不带：代理会把该会话记为 bypassed，而且这是终态——这个会话之后既不会有记忆注入，也不会再写 L0。',
+  sectionIdentities: '记忆身份',
+  sectionDefaults: '默认与头名',
+  sectionPolicy: '会话与预算',
+  identityId: '身份 ID',
+  identityIdPlaceholder: '身份 ID，例如 worker',
+  teamValue: '团队 ID',
+  teamPlaceholder: '写进 x-team-id；为空则该头不发送',
+  agentValue: '代理 ID',
+  agentPlaceholder: '写进 x-agent-id；可留空',
+  taskValue: '任务 ID',
+  taskPlaceholder: '写进 x-task-id；可留空',
+  addIdentity: '添加身份',
+  removeIdentity: '删除身份',
+  expandIdentity: '展开身份',
+  collapseIdentity: '收起身份',
+  identityUntitled: '（未命名身份）',
+  headerName: '请求头名称',
+  headerValue: '值',
+  addHeader: '添加请求头',
+  removeHeader: '删除请求头',
+  emptyIdentities: '还没有记忆身份。添加一个，再到「模型」页面为模型选用；没有身份时请求会摘链。',
+  issueIdEmpty: '身份 ID 不能为空。',
+  issueIdDuplicate: '身份 ID 不能重复（不区分大小写）。',
+  issueTeamEmpty: '团队 ID 不能为空：没有团队时代理会把请求当成未识别身份，永远不注入记忆。',
+  issueNameEmpty: '设置了值时，请求头名称不能为空。',
+  issueNameInvalid: '该请求头名称不是合法的 HTTP 请求头名。',
+  issueValueInvalid: '该请求头的值不是合法的 HTTP 请求头值。',
+  defaultIdentity: '默认身份',
+  defaultIdentityNone: '不加任何身份（未指定身份的模型一律摘链）',
+  issueDefaultMissing: '默认身份指向一个不在列表里的 ID。',
+  headerNamesTitle: '身份头名',
+  headerTeamName: '团队头名',
+  headerAgentName: '代理头名',
+  headerTaskName: '任务头名',
+  issueHeaderNameEmpty: '头名不能为空。',
+  issueHeaderNameInvalid: '头名不是合法的 HTTP 请求头名。',
+  budgetEnabled: '启用预算闸门',
+  budgetTokens: '单笔请求上限（估算 token）',
+  budgetHint: '会话第一笔请求粗估超过该值时就摘链并钉住，避免「记忆 + 超长上下文」叠加。估算很粗，只作护栏。',
+  issueBudget: '上限必须是正整数。',
+  sessionHeader: '发送会话头',
+  sessionHeaderHint: '补上 x-deepseek-harness-session-id：代理才会把这一整个 DSH 会话当成一个会话，而不是每轮重开一个。',
+  unsaved: '未保存',
+  save: '保存',
+  saving: '保存中…',
+  discard: '放弃修改',
+  saveFailed: '本部署没有接受这些值，已保留供你修改。',
+  readOnly: '当前部署的设置文档为只读。',
+  modelPicker: '记忆身份',
+  modelPickerDefault: '默认（随默认身份）',
+  modelPickerDetached: '摘链（不带身份头）',
+  modelPickerSaveFirst: '请先保存该提供方，再选择记忆身份。',
+  modelPickerWriteFailed: '记忆身份选择保存失败',
+}
+
+export { en, zh }

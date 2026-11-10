@@ -1,0 +1,105 @@
+{
+  "name": "dsh-memory-gate",
+  "version": "0.1.0",
+  "description": "Per-model, per-session memory gate for DeepSeek Harness: decide which model calls carry the TDAI memory proxy's identity headers (x-team-id / x-agent-id / x-task-id), pin the decision for the life of a session, and detach memory once a conversation exceeds its token budget.",
+  "icon": "./icon.svg",
+  "license": "MIT",
+  "author": "WIN11",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WIN11/dsh-memory-gate.git"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "memory",
+    "tdai",
+    "memory-proxy",
+    "request-headers"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "npm run build:clean && npm run build:host && npm run build:client && npm run build:types",
+    "build:clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
+    "build:host": "node scripts/build-host.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "build:types": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepare": "npm run build",
+    "test:scripts": "node --test scripts/*.test.mjs",
+    "pack:check": "node scripts/package-artifact.mjs",
+    "install:profile": "node scripts/install-profile.mjs"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-api-remotes": ">=0.1.5-rc.2 <0.1.5 || >=0.1.7-rc.1 <0.1.7 || >=0.2.0-rc.1 <0.2.0 || >=0.2.1-rc.1 <0.2.1 || >=0.2.2-rc.1 <0.2.2",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2 <0.1.5 || >=0.1.7-rc.1 <0.1.7 || >=0.2.0-rc.1 <0.2.0 || >=0.2.1-rc.1 <0.2.1 || >=0.2.2-rc.1 <0.2.2",
+    "@deepseek-ai/dsh-settings": ">=0.1.5-rc.2 <0.1.5 || >=0.1.7-rc.1 <0.1.7 || >=0.2.0-rc.1 <0.2.0 || >=0.2.1-rc.1 <0.2.1 || >=0.2.2-rc.1 <0.2.2",
+    "@deepseek-ai/schemastery": "^3.18.0",
+    "react": "^18.2.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-api-remotes": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.2.2-rc.1",
+    "@deepseek-ai/dsh-settings": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "esbuild": "^0.28.0",
+    "jsdom": "^27.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "semver": "7.7.2",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0",
+    "yaml": "^2.9.1"
+  },
+  "allowScripts": {
+    "esbuild": true
+  },
+  "dshCompatibility": {
+    "0.2.2-rc.1": {
+      "cordis": "4.1.0",
+      "schemastery": "3.19.0"
+    }
+  }
+}

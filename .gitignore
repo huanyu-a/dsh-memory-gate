@@ -1,0 +1,8 @@
+node_modules/
+lib/
+coverage/
+docs/dev/
+*.tgz
+.npm-cache/
+tmp/
+artifacts/

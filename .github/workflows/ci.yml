@@ -1,0 +1,130 @@
+# Ordinary branch pushes do not run CI. PRs validate every declared DSH cohort
+# on Node 22 then 24. v* tags independently build and publish through npm OIDC.
+name: ci
+
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  compatibility:
+    name: Read supported DSH versions
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read package compatibility
+        id: matrix
+        run: node scripts/ci-compatibility.mjs matrix
+
+  verify:
+    name: DSH ${{ matrix.dsh-version }} · Node 22 + 24
+    needs: compatibility
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.compatibility.outputs.matrix) }}
+    env:
+      DSH_TEST_VERSION: ${{ matrix.dsh-version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node 22
+        id: setup22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # npm 10.9 / 11.6 can fail cross-cohort peer resolution with
+      # edgesOut/null or a false conflict. Keep both Node legs on one fixed CLI.
+      - name: Ensure npm CLI for cohort resolution
+        id: npm22
+        run: npm install --global npm@11.19.0
+      - name: Select exact DSH cohort
+        id: cohort
+        run: |
+          # Validate the committed 0.2.2 lock before selecting another cohort.
+          npm ci --ignore-scripts --legacy-peer-deps=false
+          CHANGED=$(node scripts/ci-compatibility.mjs select "$DSH_TEST_VERSION")
+          if [ "$CHANGED" = 'changed=true' ]; then
+            # npm resolves against the actual tree as well as the lock. Move both
+            # aside: inherited cross-cohort locks can trigger unbounded peer backtracking.
+            mkdir -p artifacts/ci
+            mv node_modules artifacts/ci/committed-node_modules
+            mv package-lock.json artifacts/ci/committed-package-lock.json
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund --legacy-peer-deps=false
+          fi
+      - name: Verify Node 22
+        id: verify22
+        if: ${{ !cancelled() && steps.cohort.outcome == 'success' }}
+        run: node scripts/ci-verify.mjs verify 22
+      - name: Set up Node 24
+        id: setup24
+        if: ${{ !cancelled() }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Ensure npm CLI for cohort resolution
+        id: npm24
+        run: npm install --global npm@11.19.0
+      # Node 22 failures must not hide the independent Node 24 result.
+      - name: Verify Node 24
+        id: verify24
+        if: ${{ !cancelled() && steps.setup24.outcome == 'success' && steps.cohort.outcome == 'success' }}
+        run: node scripts/ci-verify.mjs verify 24
+      - name: Test summary
+        if: always()
+        env:
+          SETUP_22: ${{ steps.setup22.outcome }}
+          SETUP_24: ${{ steps.setup24.outcome }}
+          VERIFY_22: ${{ steps.verify22.outcome }}
+          VERIFY_24: ${{ steps.verify24.outcome }}
+        run: node scripts/ci-verify.mjs summary
+
+  publish:
+    name: build + npm publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # npm OIDC requires >=11.5.1. No long-lived npm token is used.
+      - name: Ensure npm CLI with trusted publishing support
+        run: npm install --global npm@11.6.2
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --legacy-peer-deps=false
+      - name: Version, tag and npm latest gates
+        id: gate
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-gate.mjs
+      - name: Build
+        run: npm run build
+      # Build is explicit; do not run tests, prepare or prepack on tags.
+      - name: Publish (OIDC trusted publishing)
+        env:
+          DIST_TAG: ${{ steps.gate.outputs.dist-tag }}
+        run: npm publish --ignore-scripts --access public --provenance --tag "$DIST_TAG" --registry https://registry.npmjs.org

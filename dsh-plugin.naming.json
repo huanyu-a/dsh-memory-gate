@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "policy": "dsh-plugin-naming/v1",
+  "plugin": {
+    "namespace": "WIN11",
+    "name": "memory-gate",
+    "coordinate": "WIN11/memory-gate",
+    "packageName": "dsh-memory-gate"
+  },
+  "names": {
+    "pluginNames": ["dsh-memory-gate"],
+    "loaderIds": ["dsh-memory-gate"],
+    "services": [],
+    "tools": [],
+    "commands": [],
+    "skills": [],
+    "skillProviders": [],
+    "events": [],
+    "settingsNamespaces": ["memory-gate"],
+    "routes": []
+  }
+}
