@@ -45,6 +45,25 @@ export const STORE_NS = PLUGIN_ID
  * it gives every memory-chain request a stable, session-scoped identity, so
  * the proxy reuses one registered session instead of starting a new one on
  * every turn.
+ *
+ * WHY THIS EXACT NAME. `resolveConversationId()` reads seven candidates in
+ * order, first non-empty wins:
+ *
+ *   1 x-parent-conversation-id   2 x-conversation-id   3 x-session-id
+ *   4 x-claude-code-session-id   5 x-deepseek-harness-session-id
+ *   6 x-chat-id                  7 x-thread-id
+ *
+ * The proxy source comments #5 as "dsh (deepseek-harness) sends this" — but DSH
+ * never does, which is why the proxy logs `conversationId=null` and cannot
+ * group turns. Filling in #5 is therefore the intended repair. It also stays
+ * clear of #3, so if anything else ever sets `x-session-id` this plugin does
+ * not fight it for precedence.
+ *
+ * Do not "fix" this to `x-session-id` on the strength of a request example:
+ * the examples use #3 only because any of the seven works. Injection size is
+ * identical either way (the proxy injects its L2/L3 profile, not the turn
+ * history), so a size comparison cannot tell the two apart — only the
+ * resolution chain can.
  */
 export const DSH_SESSION_HEADER = 'x-deepseek-harness-session-id'
 

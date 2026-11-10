@@ -119,3 +119,22 @@ Schema.resolve('x', markedSchema, {})  // ✅ 值在前、schema 在后
 `appendDecisionLog` 原本每行各跑一次 `stat` + `appendFile`，两行并发时后发的可能先落盘，日志里就会出现 `pinned` 排在造成它的 `attached` 之上。现在按文件串成一条链（`logTails`），追加顺序等于调用顺序，`flushDecisionLog(dir)` 可以等最后一行落地。测试 `store.spec.ts` 的「orders a batch of appends by call order」锁住这条契约。
 
 顺带两个边界：目录在排队期间被删除（卸载、临时目录清理）时该行**静默丢弃**而不是告警——日志是诊断素材，不是状态；`mkdir` 必须在入队时同步完成，放到队列里执行会在这个窗口里造出目录或撞 ENOENT。
+
+### 7.6 会话头为什么必须是 `x-deepseek-harness-session-id`（一次差点改错）
+
+装配完之后我一度判断这里有个缺陷：设计文档里的示例请求头写的是 `x-session-id`，而插件发的是 `x-deepseek-harness-session-id`，于是打算"改正"过来。这个判断是错的，原因值得记下来。
+
+代理的 `session/session-key.ts` → `resolveConversationId()` 是按顺序读**七个**候选头，取第一个非空值：
+
+```
+1 x-parent-conversation-id   2 x-conversation-id   3 x-session-id
+4 x-claude-code-session-id   5 x-deepseek-harness-session-id
+6 x-chat-id                  7 x-thread-id
+```
+
+- 设计文档的示例用 `x-session-id`，只是因为**七个里任意一个都能生效**，它排在第 3 位而已；示例不是规格。
+- 代理源码在**第 5 个**候选上注释 "dsh (deepseek-harness) sends this"，而实测 DSH 从不发它——这正是代理日志里 `conversationId=null` 出现 975 次的原因。插件补第 5 位才是对症的修法；还能避开第 3 位，将来真有别的组件设 `x-session-id` 也不会互相抢优先级。
+
+更关键的是：**注入量无法用来区分这两个头**。实测带身份头时 `prompt_tokens` 恒为 3541~3543，不管发哪个会话头都一样——因为代理注入的是 L2/L3 画像，不重放对话历史。所以"同一 id 连发两次看 prompt 是否增长"这个看起来很合理的实验，根本测不出来。判定只能靠解析链本身。
+
+教训：**示例值不是规格**。用户可见的文档示例常常只是众多可行取值之一，动代码前要去读实现里真正的判定逻辑。
