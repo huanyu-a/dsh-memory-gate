@@ -130,6 +130,8 @@ dsh plugin --profile <profile> add ./dsh-memory-gate-<version>.tgz
 
    ```sh
    tail -n 5 ~/.dsh/storage/memory-gate/decisions.jsonl
+   # Windows PowerShell:
+   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\decisions.jsonl" -Tail 5
    ```
 
    应看到一行 `{"kind":"attach","reason":"attached",...,"identity":"worker",...}`；非记忆链路由不会产生任何行。
@@ -138,6 +140,8 @@ dsh plugin --profile <profile> add ./dsh-memory-gate-<version>.tgz
 
    ```sh
    cat ~/.dsh/storage/memory-gate/sessions.json
+   # Windows PowerShell:
+   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\sessions.json"
    ```
 
    应看到该 `sessionId` 对应一条 `{ "identity": "worker", "reason": "attached", ... }`（或摘链时的 `"identity": null`）。
@@ -208,6 +212,7 @@ llm-pi-ai:
 - 预算闸门是**粗估**，不是 tokenizer：每 4 个非 CJK 字符算 1 token，每个 CJK 字符算 0.75 token，另加每条消息 8 token 的固定开销。它只回答「这个会话是不是已经很大了」。
 - 会话头让代理把 DSH 会话当成一个会话；但它**不**改变 DSH 自己的会话划分，也不改变代理的 L0/L1/L2/L3 分层与注入器配置——那些都在服务器 YAML 里。
 - 8420 / 8125 未被使用；插件不新增隧道、不转发流量、不落地任何记忆内容。
+- **判断本插件是否生效，只能看它自己的两个文件**：`decisions.jsonl` 有没有 `attach`、`sessions.json` 里该会话的 `identity` 是不是非空。代理侧的 `conversation/count`、`layer_counts`、面板数据都在数据面（8420/8125），而本机常见的接法是**只把 8096 转发出来**（`ssh -L …:8096:…`）。那种情况下 `curl 127.0.0.1:8096/v3/…` 会得到 `model must be a nonempty string`——那不是插件的问题，是 8096 是 chat 路由、`/v3` 数据面根本不在这条隧道上。别据此判断"记忆没接上"。
 - 下拉框通过 DOM 锚定注入到官方模型页每行的「模型选项」折叠区（0.1.5 叫「容量」；官方槽位没有模型行级扩展点）。页面结构若变化，插件会停止注入而不影响页面本身；折叠的模型行不渲染该容器，也就没有下拉框，展开即出现。
 
 ## 开发

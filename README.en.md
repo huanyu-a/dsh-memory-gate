@@ -134,6 +134,8 @@ Data lives under `~/.dsh/storage/memory-gate/` (`~` comes from `$DSH_HOME`, else
 
    ```sh
    tail -n 5 ~/.dsh/storage/memory-gate/decisions.jsonl
+   # Windows PowerShell:
+   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\decisions.jsonl" -Tail 5
    ```
 
    You should see a line like `{"kind":"attach","reason":"attached",...,"identity":"worker",...}`. Non-memory-chain routes produce no line at all.
@@ -142,6 +144,8 @@ Data lives under `~/.dsh/storage/memory-gate/` (`~` comes from `$DSH_HOME`, else
 
    ```sh
    cat ~/.dsh/storage/memory-gate/sessions.json
+   # Windows PowerShell:
+   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\sessions.json"
    ```
 
    The `sessionId` should map to `{ "identity": "worker", "reason": "attached", ... }` (or `"identity": null` when detached).
@@ -212,6 +216,7 @@ A deployment may also seed composition-base values through the plugin's cordis r
 - The budget gate is a **coarse estimate**, not a tokenizer: one token per four non-CJK characters, 0.75 per CJK character, plus 8 tokens of fixed overhead per message. It only answers "is this conversation already large".
 - The session header makes the proxy treat a DSH session as one conversation, but it changes neither DSH's own session boundaries nor the proxy's L0/L1/L2/L3 tiers and injector configuration — those stay in the server's YAML.
 - 8420 / 8125 are unused; the plugin adds no tunnel, forwards no traffic, and stores no memory content.
+- **Whether this plugin works can only be judged from its two own files**: does `decisions.jsonl` show `attach`, and is the session's `identity` non-empty in `sessions.json`. The proxy-side views — `conversation/count`, `layer_counts`, panel data — live on the data plane (8420/8125), and a common local setup forwards **only 8096** (`ssh -L …:8096:…`). In that case `curl 127.0.0.1:8096/v3/…` answers `model must be a nonempty string`: 8096 is a chat route and `/v3` is simply not on that tunnel. Do not read that as "memory is not connected".
 - The dropdown is injected into the official Models page's per-row **Model options** disclosure (called **Capacities** on 0.1.5) through DOM anchors, because the official slot contract offers no per-model-row extension point. If the page structure changes, the plugin simply stops injecting and leaves the page untouched; a collapsed model row renders no such container, so the dropdown appears when the row expands.
 
 ## Development
