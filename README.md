@@ -65,8 +65,9 @@ node scripts/install-profile.mjs --dry-run  # 只看计划，不写盘
 - **不要用 `link:` 依赖**。`link:` 让插件按自己的 `node_modules` 解析依赖，于是它拿到的是开发目录里的
   `@deepseek-ai/schemastery`（3.19.0），而同 profile 其它 bundle 都拿 profile 根的那份（3.18.5）。
   `file:` tarball 交给 pnpm 托管，解析路径与其它插件完全一致。
-- **换了 tarball 内容后必须强制重装**。lockfile 记录的是 `file:` 依赖的完整性，替换 `.tgz` 而不改 specifier
-  时 pnpm 会打印 `Already up to date` 并原样复用旧目录。`install-profile.mjs` 因此每次都先删掉已安装目录再装。
+- **换了 tarball 内容后必须强制重装**。lockfile 里记着 `file:` 依赖的 `integrity`；替换 `.tgz` 而 specifier 不变时，
+  pnpm 会打印 `Already up to date` 并原样复用上次的解包目录。`install-profile.mjs` 因此每次都**重新 build + 重新 pack**、
+  删掉已安装目录，并把该包在 lockfile 里的两条记录（importer 与 packages）删掉，逼 pnpm 重新计算哈希再解包。
 
 ### 其它安装源
 
@@ -241,8 +242,10 @@ shim），而 `node -e …` 不能走 shell（`cmd.exe` 会重解析里面的引
 | `tests/host.spec.ts` | 假 cordis Context 上的 apply()：监听器注册、`Headers` 实际取值、非记忆链不改头、坏行只丢一行、fail-open、决策日志与单次播报、dispose 时落盘、写时校验两种 cordis 调用形状、0.1.5 命名空间注册，以及**真实 schemastery 对 `Config` 的 `resolve`**（空/完整/部分三组输入） |
 
 最后那组 schema 测试不是凑数：`apply()` 是内核**在校验之后**才调用的，只测 `apply()` 永远碰不到 schema 层，
-一个"能构建但 resolve 不了"的 `Config` 会带着全绿的测试装进 profile 然后在内核里炸。这个盲区确实漏过一个真实缺陷
-（见 `DESIGN.md` §7）。
+一个"能构建但 resolve 不了"的 `Config` 会带着全绿的测试装进 profile 然后在内核里炸。
+
+它还有一层用处：我一度误判 schema 构建错了，正是这组测试按正确签名调用 `resolve`、证明 schema 一直是好的，
+才把结论拉回正轨——真正的错误在我自己写的探测里（`Schema.resolve` 参数顺序传反）。完整复盘见 `DESIGN.md` §7.1。
 
 CI 仅在 PR 和 `v*` 标签推送时运行。PR 从 `package.json` 的 `dshCompatibility` 读取精确 DSH/Cordis/Schemastery 矩阵，在 Node 22、24 上运行静态、单元与打包检查；标签独立执行发布门禁、显式构建和 npm OIDC 发布，不重复运行测试。CI 不上传 artifacts 或创建 GitHub Release。
 

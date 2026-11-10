@@ -67,9 +67,11 @@ Three hard rules, enforced by the script and required when installing by hand:
   `node_modules`, handing it the dev tree's `@deepseek-ai/schemastery` (3.19.0) while every other bundle in the
   same profile gets the profile root's copy (3.18.5). A `file:` tarball is hoisted by pnpm and resolves exactly
   like the rest.
-- **Force a reinstall after replacing the tarball.** A lockfile records the integrity of a `file:` dependency, so
-  swapping the `.tgz` without changing the specifier makes pnpm print `Already up to date` and reuse the old
-  directory verbatim. `install-profile.mjs` therefore removes the installed directory before every install.
+- **Force a reinstall after replacing the tarball.** A lockfile records the `integrity` of a `file:` dependency, so
+  swapping the `.tgz` without changing the specifier makes pnpm print `Already up to date` and reuse the previous
+  extraction verbatim. `install-profile.mjs` therefore rebuilds and repacks every time, removes the installed
+  directory, and deletes both lockfile records for the package (importer and packages section) so pnpm re-hashes
+  and re-extracts instead of trusting the stale entry.
 
 ### Other sources
 
@@ -246,7 +248,11 @@ All tests live in `tests/`:
 
 That last group is not filler: `apply()` is only called *after* the loader validates the row, so tests that call
 `apply()` directly never touch the schema layer. A `Config` that builds but cannot resolve would ship with an
-all-green suite and then break inside the kernel — a blind spot that did hide one real defect (see `DESIGN.md` §7).
+all-green suite and then break inside the kernel.
+
+It also earned its keep as a tiebreaker: when I briefly believed the schema itself was broken, this group — calling
+`resolve` with the correct signature — showed the schema had been fine all along. The actual bug was in my own
+probe (`Schema.resolve` takes the value first). Full post-mortem in `DESIGN.md` §7.1.
 
 CI runs only for PRs and `v*` tag pushes. PRs read the exact DSH/Cordis/Schemastery matrix from `package.json` → `dshCompatibility` and run static, unit and package checks on Node 22 then 24; tags independently run release gates, an explicit build, and npm OIDC publishing without repeating tests. CI does not upload artifacts or create GitHub Releases.
 

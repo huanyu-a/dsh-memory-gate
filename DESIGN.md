@@ -68,32 +68,54 @@ not a memory-chain baseURL           → skip（一个头都不加）
 2. 装进 `desktop` profile 后，设置页出现「记忆闸门」卡片；模型页每行出现记忆身份下拉框。
 3. 真实请求下：`decisions.jsonl` 出现 `attach identity=…`，且 `sessions.json` 出现该会话的钉住记录；把某模型设为「摘链」后，新会话出现 `detach reason=model-detached`，而**旧会话仍是 attach**（钉住生效）。
 
-## 7. 两个已踩过的坑（装进真实 profile 才暴露）
+## 7. 装进真实 profile 才暴露的五件事
 
-### 7.1 `.volatile()` 只能内联链式调用
+### 7.1 一次误判：`.volatile()` 探测的坑不在 `volatile`，在 `resolve` 的参数顺序
 
-DSH 桌面 profile 实际解析到的是 `@deepseek-ai/schemastery@3.18.5`（profile 根），而不是我开发目录里的 3.19.0。`volatile()` 的语义是**给它被调用的那个 schema 打标记并返回同一个 schema**，不是返回包装器：
+先把结论说清楚：**`live()` 从第一版就是对的**，不需要改成"内联链式调用"。`volatile()` 给自己的 schema 打上 `meta.volatile` 并返回同一个 schema，所以在已构建的字段上调用它完全正确。18:06 装进 profile 的那一版（就是原始 `live()`）确实在真实内核里挂载成功并持续写决策日志，这就是最直接的证据。
 
-```ts
-const ok = Schema.string().default('x').volatile()   // ✅ meta.volatile = true
-```
-
-先建好字段再把 `.volatile()` 的结果包一层，会得到一个 `type === undefined` 的坏 schema，`Schema.resolve` 直接抛 `unsupported type "undefined"`。改正方式是让 `live()` 接收一个**构造函数**、在内部内联打标：
+我当时判它"坏"是因为自己写错了一行探测：
 
 ```ts
-function live<T>(build: () => Schema<T>): Schema<T> {
-  const field = build()
-  if (!supportsVolatile) return field
-  return (field as unknown as { volatile(): Schema<T> }).volatile()
-}
+Schema.resolve(markedSchema, 'x')   // ❌ 参数传反了
+Schema.resolve('x', markedSchema, {})  // ✅ 值在前、schema 在后
 ```
 
-顺带记一个签名坑：`Schema.resolve(data, schema, options)` **值在前、schema 在后**。传反了同样报 `unsupported type "undefined"`，会让人误判成 schema 坏了。探测结果要经过一次真实 `resolve` 才可信，否则 3.18.2 之前那种"有 volatile 但没有 meta 语义"的版本会被放过。
+`Schema.resolve(data, schema, options)` 的签名是**值在前**。传反后它把 schema 当成值、把值当成 schema，对任何健康的 schema 都会抛 `unsupported type "undefined"`——我因此误以为 schema 构建错了，并"修"了一个并不存在的缺陷。原始代码回退后，用正确的参数顺序调用 `resolve` 立刻通过。
+
+教训比结论值钱：
+
+- 探测代码本身也是代码，它的 bug 会伪装成被测对象的 bug。判断"某功能坏了"之前，先证明探测是对的。
+- 三条互相独立的证据指向同一结论时（旧构建在真实内核里正常工作、实测原始 `live()` resolve 通过、错误只在参数顺序颠倒时复现），应当推翻假设，而不是继续修补。
+
+`supportsVolatile` 仍然保留，但它的职责是**版本门禁**（3.18.2 之前没有 `.volatile()`），且现在会真正用一次正确签名的 `resolve` 验证探测结果，避免把"有 volatile 但没有 meta 语义"的版本放行。
 
 ### 7.2 单测绿不代表内核能加载
 
-`apply()` 是内核**在校验之后**才调用的，所以直接 `apply(badConfig)` 的测试永远碰不到 schema 层。`tests/host.spec.ts` 里「Config schema under the real schemastery」那组用真实 `Schema.resolve` 覆盖空配置 / 完整身份 / 部分配置三种输入，就是为了补这个盲区——上面 7.1 的缺陷正是它之前漏掉的。
+`apply()` 是内核**在校验之后**才调用的，所以直接 `apply(config)` 的测试永远碰不到 schema 层：一个能构建但 resolve 不了的 `Config` 会带着全绿测试装进 profile，然后在内核里炸。`tests/host.spec.ts` 的「Config schema under the real schemastery」那组因此用真实 `Schema.resolve` 覆盖空配置 / 完整身份 / 部分配置三种输入。
+
+这组测试在 7.1 里起到了作用：它按正确签名调用 `resolve`，证明 schema 一直是好的，也是我最终发现误判的依据之一。
 
 ### 7.3 安装方式：用 tarball，不要用 `link:`
 
-`link:` 会让插件按自己的 `node_modules` 解析依赖，于是它拿到 schemastery 3.19.0，而同 profile 的其它插件都拿 3.18.5——多出一份实例，`Symbol.for('schemastery')` 虽然还能互认，但任何版本行为差异都会变成只有这一个插件踩到的坑。`file:` tarball 交给 pnpm 托管，解析路径与其它插件完全一致（已实测解析到 profile 根 3.18.5，且插件目录内没有嵌套 `node_modules`）。
+`link:` 会让插件按自己的 `node_modules` 解析依赖，于是它拿到 schemastery 3.19.0，而同 profile 的其它插件都拿 3.18.5——多出一份实例。`Symbol.for('schemastery')` 虽然让两边互认，但任何版本行为差异都会变成只有这一个插件踩到的坑。`file:` tarball 交给 pnpm 托管，解析路径与其它插件完全一致（已实测解析到 profile 根 3.18.5，且插件目录内没有嵌套 `node_modules`）。
+
+### 7.4 陈旧的 tarball 会伪装成一次成功安装（真实缺陷）
+
+`install-profile.mjs` 最初写成"tarball 存在就跳过 build + pack"。回退 §7.1 的改动后我重跑了 `npm run build`，却没有重新打包，于是：
+
+- 脚本报告的每一步都成功；
+- 装进去的 `lib/index.js` 与**当时**的 `artifacts/*.tgz` 完全一致；
+- 但那个 tarball 是上一轮的产物，比 `src/` 落后十几分钟。
+
+字节比对是"构建 vs 安装"，两边都指向旧内容，所以它照样通过。真正落后的那一环（`src` → tarball）没人检查。修法是**每次都无条件重新 build + 重新 pack**，并在 pack 前先删掉旧 tarball，避免打包失败时旧文件被下一次运行捡走。
+
+同一类问题的第二层在 pnpm 侧：lockfile 的 `file:` 依赖记录着 tarball 的 `integrity`。只替换 `.tgz` 而不动 specifier，pnpm 会说 `Already up to date` 并复用上次的解包目录——即使目录已被删掉，它也能从 store 里恢复旧内容。所以脚本还会删掉该包在 lockfile 里的 importer 与 packages 两条记录，逼它重新计算哈希。
+
+`scripts/install-profile.test.mjs` 用静态断言锁住这两点（含"找不到可删记录就硬失败"，避免静默变成空操作）。
+
+### 7.5 决策日志的追加顺序（真实缺陷）
+
+`appendDecisionLog` 原本每行各跑一次 `stat` + `appendFile`，两行并发时后发的可能先落盘，日志里就会出现 `pinned` 排在造成它的 `attached` 之上。现在按文件串成一条链（`logTails`），追加顺序等于调用顺序，`flushDecisionLog(dir)` 可以等最后一行落地。测试 `store.spec.ts` 的「orders a batch of appends by call order」锁住这条契约。
+
+顺带两个边界：目录在排队期间被删除（卸载、临时目录清理）时该行**静默丢弃**而不是告警——日志是诊断素材，不是状态；`mkdir` 必须在入队时同步完成，放到队列里执行会在这个窗口里造出目录或撞 ENOENT。

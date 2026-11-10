@@ -71,21 +71,24 @@ const pnpmCjs = join(runtime, 'pnpm', 'bin', 'pnpm.cjs')
 const pnpmVersion = execFileSync(nodeExe, [pnpmCjs, '--version'], { encoding: 'utf8' }).trim()
 
 // ---- step 1: build and pack the artifact ---------------------------------
+// Always rebuild and repack. A leftover tarball looks like a valid artifact but
+// its contents can predate the current build — that is exactly how a stale
+// bundle gets installed while every check on the *artifact* still passes. Only
+// the source-to-artifact chain can be trusted, so run it every time.
 
 const tarballName = `${pkg.name}-${pkg.version}.tgz`
 const artifactDir = resolve('artifacts')
 const tarball = join(artifactDir, tarballName)
-if (!existsSync(tarball)) {
-  if (dryRun) {
-    console.log(`install-profile: [dry] would run \`npm run build && npm pack\` to produce ${tarball}`)
-  } else {
-    console.log('install-profile: building and packing the artifact…')
-    execFileSync('npm', ['run', 'build'], { stdio: 'inherit', shell: process.platform === 'win32' })
-    execFileSync('npm', ['pack', '--ignore-scripts', '--pack-destination', artifactDir], {
-      stdio: 'inherit',
-      shell: process.platform === 'win32',
-    })
-  }
+if (dryRun) {
+  console.log(`install-profile: [dry] would run \`npm run build && npm pack\` to produce ${tarball}`)
+} else {
+  console.log('install-profile: building and packing the artifact…')
+  execFileSync('npm', ['run', 'build'], { stdio: 'inherit', shell: process.platform === 'win32' })
+  rmSync(tarball, { force: true })
+  execFileSync('npm', ['pack', '--ignore-scripts', '--pack-destination', artifactDir], {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  })
 }
 
 // ---- step 2: plan --------------------------------------------------------
@@ -118,11 +121,54 @@ profilePkg.dependencies = { ...profilePkg.dependencies, [pkg.name]: specifier }
 if (!profilePkg.dsh.profile.bundles.includes(pkg.name)) profilePkg.dsh.profile.bundles.push(pkg.name)
 writeFileSync(profilePkgPath, `${JSON.stringify(profilePkg, null, 2)}\n`, 'utf8')
 
-// ---- step 4: copy the artifact and drop the extracted tree --------------
-// Both are required: pnpm skips work when the lockfile specifier is unchanged,
-// so the old directory would otherwise be reused verbatim.
+// ---- step 4: copy the artifact and forget the previous extraction -------
+// A `file:` dependency's lockfile record carries the tarball's integrity hash.
+// Replacing the .tgz while keeping the specifier leaves that record stale, and
+// pnpm then reports "Already up to date" and reuses the previously extracted
+// tree — the new build never lands. Dropping the importer entry and the
+// package record forces pnpm to re-hash and re-extract.
 copyFileSync(tarball, join(profile, tarballName))
 rmSync(target, { recursive: true, force: true })
+
+const lockPath = join(profile, 'pnpm-lock.yaml')
+const lockLines = readFileSync(lockPath, 'utf8').split(/\r?\n/)
+const dropped = []
+const kept = []
+let skipping = false
+for (const line of lockLines) {
+  // Importer entry: `      dsh-memory-gate:` then its specifier/version lines.
+  if (/^\s{6}dsh-memory-gate:\s*$/.test(line)) {
+    skipping = true
+    dropped.push(line)
+    continue
+  }
+  if (skipping) {
+    if (/^\s{8}(specifier|version):/.test(line)) {
+      dropped.push(line)
+      continue
+    }
+    skipping = false
+  }
+  // Packages entry: `  dsh-memory-gate@file:...:` plus its indented body.
+  if (/^\s{2}dsh-memory-gate@file:.*:\s*$/.test(line)) {
+    skipping = true
+    dropped.push(line)
+    continue
+  }
+  if (skipping) {
+    if (/^\s{4,}/.test(line) || line.trim() === '') {
+      dropped.push(line)
+      continue
+    }
+    skipping = false
+  }
+  kept.push(line)
+}
+if (kept.length === lockLines.length) {
+  fail(`no lockfile record for ${pkg.name} was found in ${lockPath}; cannot force a re-extract safely`)
+}
+writeFileSync(lockPath, kept.join('\n'), 'utf8')
+console.log(`install-profile: dropped ${dropped.length} stale lockfile line(s) for ${pkg.name}`)
 
 // ---- step 5: install with the app's own pnpm ----------------------------
 

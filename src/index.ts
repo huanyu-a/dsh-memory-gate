@@ -112,20 +112,21 @@ export interface Config {
 }
 
 /**
- * `.volatile()` must be chained **directly** onto a field schema
- * (`Schema.string().volatile()`). It does not return a wrapper schema: it
- * marks the schema it was called on. Probing it out of band — building the
- * field, then calling `.volatile()` on the result — yields an unusable schema
- * that fails `Schema.resolve` with `unsupported type "undefined"`, so the
- * flag has to be applied inline, at the only place that knows the chain.
+ * Probe the schemastery capability that 0.1.7+ ships: `.volatile()` does not
+ * exist before 3.18.2 (DSH 0.1.5), so the same schema must build on both
+ * generations. Plain on 0.1.5, live-editable on 0.1.7+.
+ *
+ * `volatile()` marks the schema it is called on and returns that same marked
+ * schema, so calling it on an already-built field is correct — the probe below
+ * verifies the *result* resolves, which is the property the loader relies on.
+ * (`Schema.resolve` takes the value first: `resolve(data, schema, options)`.)
  */
 const supportsVolatile: boolean = (() => {
   try {
-    const probe = Schema.string().default('x') as unknown as { volatile?: unknown }
-    if (typeof probe.volatile !== 'function') return false
-    // A `volatile` mark that cannot resolve is worse than no mark at all:
-    // `Schema.resolve(data, schema, options)` returns the live reference.
-    Schema.resolve('x', (probe as unknown as { volatile(): unknown }).volatile() as never, {})
+    const field = Schema.string().default('x') as unknown as { volatile?: unknown }
+    if (typeof field.volatile !== 'function') return false
+    const marked = (field as unknown as { volatile(): unknown }).volatile()
+    Schema.resolve('x', marked as never, {})
     return true
   } catch {
     return false
@@ -133,19 +134,18 @@ const supportsVolatile: boolean = (() => {
 })()
 
 /** Mark a field live-editable where the loader supports it; otherwise leave it plain. */
-function live<T>(build: () => Schema<T>): Schema<T> {
-  const field = build()
+function live<T>(field: Schema<T>): Schema<T> {
   if (!supportsVolatile) return field
   return (field as unknown as { volatile(): Schema<T> }).volatile()
 }
 
 /** Schemastery schema: Cordis validates the row config and fills defaults before apply(). */
 export const Config = Schema.object({
-  identities: live(() => Schema.array(identity).default([])),
-  defaultIdentity: live(() => Schema.string().default('')),
+  identities: live(Schema.array(identity).default([])),
+  defaultIdentity: live(Schema.string().default('')),
   headerNames,
   budget,
-  sessionHeader: live(() => Schema.boolean().default(true)),
+  sessionHeader: live(Schema.boolean().default(true)),
 })
 
 // ---- settings structural faces (compile-time privacy only; every access
