@@ -1,7 +1,7 @@
 /**
  * The section-wide field groups of the memory-gate card: the default identity
- * (chosen from the staged list), the three identity header names, the budget
- * gate and the session-header switch. Presentational only — the card owns the
+ * (chosen from the staged list), the three identity header names and the
+ * session-header switch. Presentational only — the card owns the
  * draft and passes a single `onPatch` for section-shape edits, so the dirty
  * flag, the revision baseline and the save path stay in one component.
  *
@@ -68,7 +68,7 @@ export function DefaultIdentityField(props: DefaultIdentityProps): ReactNode {
 
 /** Props of the header-name group. */
 export interface HeaderNamesProps extends SectionFieldBase {
-  /** The header-name finding only (the budget/dangling-default flags are ignored here). */
+  /** The header-name finding only (the dangling-default flag is ignored here). */
   invalid: FieldIssues['headerName']
 }
 
@@ -125,63 +125,36 @@ export function HeaderNamesField(props: HeaderNamesProps): ReactNode {
   )
 }
 
-/** Props of the budget/session group. */
-export interface PolicyFieldsProps extends SectionFieldBase {
-  /** The budget finding only. */
-  invalid: FieldIssues['budget']
-}
+/** Props of the session group. */
+export interface PolicyFieldsProps extends SectionFieldBase {}
 
 /**
- * The session-shaping switches: the client-side budget gate (detach memory
- * when a session's first request is estimated above the ceiling) and whether
- * the harness session header rides along.
+ * Approved origins and the switch controlling the harness session header.
+ * Keep origin lines verbatim so invalid drafts reach the host validator.
  */
 export function PolicyFields(props: PolicyFieldsProps): ReactNode {
-  const { t, section, disabled, invalid } = props
-  const tokensId = useId()
+  const { t, section, disabled } = props
+  const originsId = useId()
+  const originsHelpId = useId()
   return (
     <>
       <h4 className="mg-section-title">{t('sectionPolicy')}</h4>
-      <label className="mg-check">
-        <input
-          type="checkbox"
-          checked={section.budget.enabled}
-          disabled={disabled}
-          onChange={(event) => {
-            props.onPatch({ budget: { ...section.budget, enabled: event.target.checked } })
-          }}
-        />
-        <span>{t('budgetEnabled')}</span>
-      </label>
       <div className="mg-field">
-        <label className="mg-label" htmlFor={tokensId}>{t('budgetTokens')}</label>
-        <input
-          id={tokensId}
-          className={`mg-input mg-input-narrow${invalid !== null ? ' mg-input-invalid' : ''}`}
-          type="number"
-          min={1}
-          step={1}
-          value={section.budget.maxRequestTokens > 0 ? String(section.budget.maxRequestTokens) : ''}
-          placeholder="120000"
+        <label className="mg-label" htmlFor={originsId}>{t('trustedOrigins')}</label>
+        <textarea
+          id={originsId}
+          className="mg-input"
+          rows={3}
+          value={section.trustedOrigins.join('\n')}
           disabled={disabled}
+          aria-describedby={originsHelpId}
           onChange={(event) => {
-            const raw = event.target.value
-            const parsed = Number(raw)
-            // A cleared or half-typed field stages 0 — invalid, and rendered
-            // empty — rather than clobbering the number on every keystroke.
-            props.onPatch({
-              budget: {
-                ...section.budget,
-                maxRequestTokens: raw.trim().length === 0 || !Number.isFinite(parsed)
-                  ? 0
-                  : Math.max(0, Math.floor(parsed)),
-              },
-            })
+            const value = event.target.value
+            props.onPatch({ trustedOrigins: value === '' ? [] : value.split(/\r?\n/) })
           }}
         />
+        <p id={originsHelpId} className="mg-hint">{t('trustedOriginsHint')}</p>
       </div>
-      {invalid === null ? null : <p className="mg-issue" role="alert">{t(invalid)}</p>}
-      <p className="mg-hint">{t('budgetHint')}</p>
       <label className="mg-check">
         <input
           type="checkbox"

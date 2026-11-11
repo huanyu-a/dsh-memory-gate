@@ -67,18 +67,34 @@ export const STORE_NS = PLUGIN_ID
  */
 export const DSH_SESSION_HEADER = 'x-deepseek-harness-session-id'
 
+/** The identity fields that own a configurable header name. */
+export const CONFIGURED_HEADER_FIELDS = ['team', 'agent', 'task'] as const
+
+/**
+ * Header names a configured identity field must never take.
+ *
+ * Two reasons, both measured: an attach would overwrite the caller's own
+ * credential (`authorization` becomes the team value), and a detach deletes the
+ * names this plugin may have set — so configuring `authorization` would delete
+ * the caller's Bearer token.
+ */
+export const RESERVED_TRANSPORT_HEADERS: readonly string[] = [
+  'authorization',
+  'cookie',
+  'proxy-authorization',
+  'host',
+  'content-length',
+  'content-type',
+  'connection',
+  'transfer-encoding',
+  'expect',
+  'upgrade',
+]
+
 /** Default identity header names, matching the proxy's `headerAutoSelect` defaults. */
 export const DEFAULT_TEAM_HEADER = 'x-team-id'
 export const DEFAULT_AGENT_HEADER = 'x-agent-id'
 export const DEFAULT_TASK_HEADER = 'x-task-id'
 
-/**
- * How a provider is recognized as sitting behind the TDAI memory proxy.
- * The proxy is normally exposed as `http://127.0.0.1:8096/<agentSource>/<spaceId>`,
- * so the match is on the port-bearing origin of the provider's base URL.
- */
-export const MEMORY_CHAIN_URL_PATTERNS: readonly RegExp[] = [
-  /:8096(\/|$)/i,
-  /\/\/[^/]*tdai[^/]*\//i,
-  /\/\/[^/]*memory[^/]*\//i,
-]
+/** Only explicitly trusted HTTP(S) origins may receive memory identity headers. */
+export const DEFAULT_TRUSTED_ORIGINS: readonly string[] = ['http://127.0.0.1:8096']

@@ -1,17 +1,16 @@
 /**
  * Pure identity logic: section defaults and coercion, write-time validation
  * (case-insensitive id uniqueness, Fetch-representable header names/values),
- * call-time header assembly, memory-chain recognition, the token estimator the
- * budget gate uses, and the model-row pick reader.
+ * call-time header assembly, memory-chain recognition, and the model-row pick reader.
  *
  * Every function here is shared by the host and browser halves, so these tests
  * are the contract both halves rely on.
  */
 
 import { describe, expect, it } from 'vitest'
+import { DSH_SESSION_HEADER } from '../src/constants.js'
 import {
   defaultSection,
-  estimateTokens,
   findIdentity,
   identityFromUnknown,
   identityHeaders,
@@ -43,12 +42,12 @@ function section(overrides: Partial<MemoryGateSection> = {}): MemoryGateSection 
 }
 
 describe('defaultSection', () => {
-  it('starts empty, teamless and detached from any budget', () => {
+  it('starts empty and teamless', () => {
     expect(defaultSection()).toEqual({
       identities: [],
+      trustedOrigins: ['http://127.0.0.1:8096'],
       defaultIdentity: '',
       headerNames: NAMES,
-      budget: { enabled: false, maxRequestTokens: 120_000 },
       sessionHeader: true,
     })
   })
@@ -57,10 +56,10 @@ describe('defaultSection', () => {
     const first = defaultSection()
     first.identities.push(identity())
     first.headerNames.team = 'x-evil'
-    first.budget.enabled = true
+    first.trustedOrigins.length = 0
+    expect(defaultSection().trustedOrigins).toEqual(['http://127.0.0.1:8096'])
     expect(defaultSection().identities).toEqual([])
     expect(defaultSection().headerNames.team).toBe('x-team-id')
-    expect(defaultSection().budget.enabled).toBe(false)
   })
 })
 
@@ -70,6 +69,18 @@ describe('normalizeSection', () => {
     expect(normalizeSection(null)).toEqual(defaultSection())
     expect(normalizeSection('garbage')).toEqual(defaultSection())
     expect(normalizeSection([])).toEqual(defaultSection())
+  })
+
+  it('defaults only missing origins, preserves deny-all, and normalizes valid origins', () => {
+    expect(normalizeSection({}).trustedOrigins).toEqual(['http://127.0.0.1:8096'])
+    expect(normalizeSection({ trustedOrigins: [] }).trustedOrigins).toEqual([])
+    expect(normalizeSection({ trustedOrigins: ['HTTPS://Memory.Example:443/'] }).trustedOrigins).toEqual(['https://memory.example'])
+  })
+
+  it.each([null, 'https://example.com', [42], [''], ['not a URL'], ['ftp://example.com'],
+    ['http://user:secret@example.com'], ['http://@example.com'], ['https://example.com/path'],
+    ['https://example.com/a/..'], ['https://example.com/?'], ['https://example.com/#']])('preserves invalid origins for validation: %j', trustedOrigins => {
+    expect(() => { assertValidSection(normalizeSection({ trustedOrigins })) }).toThrow(/trustedOrigins/)
   })
 
   it('keeps identities as staged, coercing unrepresentable fields instead of dropping them', () => {
@@ -101,21 +112,6 @@ describe('normalizeSection', () => {
   it('trims header-name overrides and falls back to the proxy defaults per field', () => {
     const out = normalizeSection({ headerNames: { team: '  X-Team  ', agent: '', task: 42 } })
     expect(out.headerNames).toEqual({ team: 'X-Team', agent: 'x-agent-id', task: 'x-task-id' })
-  })
-
-  it('only enables the budget on a literal true and floors a positive limit', () => {
-    expect(normalizeSection({ budget: { enabled: true, maxRequestTokens: 12.9 } }).budget)
-      .toEqual({ enabled: true, maxRequestTokens: 12 })
-    // Anything but `true` keeps the default (a string "true" is not a boolean).
-    expect(normalizeSection({ budget: { enabled: 'true', maxRequestTokens: 12 } }).budget.enabled).toBe(false)
-    expect(normalizeSection({ budget: { enabled: false } }).budget)
-      .toEqual({ enabled: false, maxRequestTokens: 120_000 })
-  })
-
-  it('rejects non-positive, non-finite and non-numeric budget limits', () => {
-    for (const maxRequestTokens of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '5000', null]) {
-      expect(normalizeSection({ budget: { enabled: true, maxRequestTokens } }).budget.maxRequestTokens).toBe(120_000)
-    }
   })
 
   it('treats only an explicit false as "do not send the session header"', () => {
@@ -158,6 +154,26 @@ describe('identityFromUnknown', () => {
 describe('validateIdentities', () => {
   it('accepts a usable list', () => {
     expect(validateIdentities(section({ identities: [identity(), identity({ id: 'Relay' })] }))).toEqual([])
+  })
+
+  it.each(['off', 'default', ' OFF ', ' Default '])('rejects reserved model-pick id %j', id => {
+    expect(validateIdentities(section({ identities: [identity({ id })] })))
+      .toEqual([{ identity: 0, code: 'id-duplicate', value: id.trim() }])
+    expect(() => { assertValidSection(section({ identities: [identity({ id })] })) })
+      .toThrow(`uses the reserved model-pick id "${id.trim()}"`)
+  })
+
+  it.each(['team', 'agent', 'task'] as const)('validates the %s header value without exposing it', field => {
+    for (const value of ['secret\r\ninjected', 'secret\u0000', 'secret\u0100']) {
+      expect(validateIdentities(section({ identities: [identity({ [field]: value })] })))
+        .toEqual([{ identity: 0, code: 'value-invalid', value: field }])
+      expect(() => { assertValidSection(section({ identities: [identity({ [field]: value })] })) })
+        .toThrow(`has a value that cannot be sent as an HTTP header ("${field}")`)
+    }
+  })
+
+  it('accepts optional empty triple values and Fetch-valid whitespace and Latin-1 values', () => {
+    expect(validateIdentities(section({ identities: [identity({ team: ' téam\t', agent: '', task: '' })] }))).toEqual([])
   })
 
   it('flags an empty id', () => {
@@ -204,6 +220,64 @@ describe('validateIdentities', () => {
     expect(issues).toEqual([{ identity: 0, row: 1, code: 'name-empty', value: 'v' }])
   })
 
+  it('never lets a configured row become the session header, even unvalidated', () => {
+    // The composition base bypasses the settings write path, so identityHeaders
+    // enforces the reservation itself: this is the last line before the wire.
+    const headers = identityHeaders(
+      identity({ team: 't', agent: 'a', task: '', headers: [
+        { name: 'x-deepseek-harness-session-id', value: 'one-conversation' },
+        { name: 'X-DeepSeek-Harness-Session-Id', value: 'other' },
+        { name: 'X-Extra', value: 'kept' },
+      ] }),
+      { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+    )
+    expect(headers).toEqual({ 'x-team-id': 't', 'x-agent-id': 'a', 'X-Extra': 'kept' })
+  })
+
+  it('refuses an extra row that claims the session header, in any casing', () => {
+    // That header is the conversation key: a constant value from a configured
+    // row would merge every session into one proxy conversation.
+    for (const name of ['x-deepseek-harness-session-id', 'X-DeepSeek-Harness-Session-Id']) {
+      const issues = validateIdentities(section({
+        identities: [identity({ headers: [{ name, value: 'one-conversation' }] })],
+      }))
+      expect(issues).toEqual([{ identity: 0, row: 0, code: 'name-reserved', value: name }])
+    }
+  })
+
+  it('refuses to let an identity field take a transport header', () => {
+    // Measured: with headerNames.team = 'authorization' an attach overwrites the
+    // caller's own Bearer token, and a detach deletes it outright.
+    for (const name of ['authorization', 'Authorization', 'cookie', 'host', 'content-length', 'content-type']) {
+      expect(() => assertValidSection(section({ headerNames: { team: name, agent: 'x-agent-id', task: 'x-task-id' } })))
+        .toThrow(/must not be/)
+    }
+    // The default names stay accepted.
+    expect(() => assertValidSection(section())).not.toThrow()
+  })
+
+  it('refuses an extra row that reuses a configured header name, in any casing', () => {
+    // The row would silently replace the value the editor shows for that field,
+    // and HTTP names are case-insensitive, so an exact-case check is not enough.
+    for (const name of ['x-team-id', 'X-Team-Id', 'x-agent-id', 'X-Task-Id']) {
+      const issues = validateIdentities(section({
+        identities: [identity({ headers: [{ name, value: 'spoof' }] })],
+      }))
+      expect(issues).toEqual([{ identity: 0, row: 0, code: 'name-conflict', value: name }])
+    }
+  })
+
+  it('refuses two rows on the same header name, in any casing', () => {
+    // HTTP names are case-insensitive, so a second row either silently drops
+    // the first value or puts two values on the wire for one header.
+    for (const second of ['x-dup', 'X-Dup']) {
+      const issues = validateIdentities(section({
+        identities: [identity({ headers: [{ name: 'x-dup', value: 'one' }, { name: second, value: 'two' }] })],
+      }))
+      expect(issues).toEqual([{ identity: 0, row: 1, code: 'name-duplicate', value: second }])
+    }
+  })
+
   it('flags header names Fetch cannot represent', () => {
     const issues = validateIdentities(section({
       identities: [identity({ headers: [{ name: 'bad header', value: '' }] })],
@@ -233,6 +307,43 @@ describe('validateIdentities', () => {
 })
 
 describe('assertValidSection', () => {
+  it.each(['team', 'agent', 'task'] as const)('rejects invalid configured %s header names', field => {
+    for (const name of ['', 'bad header', ' x-team ', 'bad\nheader', '头']) {
+      expect(() => { assertValidSection(section({ headerNames: { ...NAMES, [field]: name } })) })
+        .toThrow(`headerNames.${field} must be a valid HTTP header name`)
+    }
+  })
+
+  it.each([
+    { ...NAMES, agent: 'X-TEAM-ID' },
+    { ...NAMES, task: 'X-TEAM-ID' },
+    { ...NAMES, task: 'X-AGENT-ID' },
+  ])('rejects case-insensitive duplicate configured header names: %j', headerNames => {
+    expect(() => { assertValidSection(section({ headerNames })) })
+      .toThrow(/duplicates another configured header name \(names are case-insensitive\)/)
+  })
+
+  it.each(['team', 'agent', 'task'] as const)('reserves the session header against %s collisions even when disabled', field => {
+    for (const sessionHeader of [true, false]) {
+      expect(() => {
+        assertValidSection(section({ headerNames: { ...NAMES, [field]: 'X-DeepSeek-Harness-Session-ID' }, sessionHeader }))
+      }).toThrow(`headerNames.${field} collides with the reserved session header`)
+    }
+  })
+
+  it('rejects a dangling nonempty default identity', () => {
+    for (const identities of [[], [identity()]]) {
+      expect(() => { assertValidSection(section({ identities, defaultIdentity: ' missing ' })) })
+        .toThrow('defaultIdentity must name a configured identity')
+    }
+  })
+
+  it('preserves empty defaults and resolves configured defaults case-insensitively', () => {
+    expect(() => { assertValidSection(defaultSection()) }).not.toThrow()
+    expect(() => { assertValidSection(section({ defaultIdentity: '  ' })) }).not.toThrow()
+    expect(() => { assertValidSection(section({ identities: [identity()], defaultIdentity: ' MAIN ' })) }).not.toThrow()
+  })
+
   it('throws a message naming the identity for an empty id', () => {
     expect(() => { assertValidSection(section({ identities: [identity({ id: '' })] })) })
       .toThrow(/^memory-gate: identity #1 needs an id$/)
@@ -348,34 +459,37 @@ describe('modelsOf / modelPickOf / providerBaseURL', () => {
 })
 
 describe('isMemoryChain', () => {
-  it('recognizes the TDAI proxy on its port, with or without a trailing path', () => {
+  it('defaults to only the loopback proxy, independently of request path', () => {
     expect(isMemoryChain('http://127.0.0.1:8096/dsh/default')).toBe(true)
     expect(isMemoryChain('http://127.0.0.1:8096')).toBe(true)
-    expect(isMemoryChain('HTTP://HOST:8096/V1')).toBe(true)
+    expect(isMemoryChain('http://127.0.0.1:8096/memory?x=1#tag')).toBe(true)
   })
 
-  it('recognizes a host that names tdai or memory', () => {
-    expect(isMemoryChain('https://tdai.example.com/v1')).toBe(true)
-    expect(isMemoryChain('https://memory.internal/v1')).toBe(true)
+  it('accepts exact explicitly configured origins with normalized hostname and default port', () => {
+    expect(isMemoryChain('https://MEMORY.example:443/v1', ['https://memory.example/'])).toBe(true)
+    expect(isMemoryChain('http://localhost:8096/v1', ['http://localhost:8096'])).toBe(true)
+    expect(isMemoryChain('https://memory.example:8443/v1', ['https://memory.example:8443'])).toBe(true)
   })
 
-  it('does not match a direct public route', () => {
-    expect(isMemoryChain('https://api.stepfun.com/v1')).toBe(false)
-    expect(isMemoryChain('https://api.deepseek.com/v1')).toBe(false)
+  it.each([
+    'http://host:8096/v1', 'http://localhost:8096/v1', 'https://127.0.0.1:8096/v1',
+    'http://127.0.0.1:8097/v1', 'http://127.0.0.1:80961/v1', 'http://127.0.0.1:18096/v1',
+    'https://tdai.example.com/v1', 'https://memory.internal/v1',
+    'https://evil.example/http://127.0.0.1:8096/v1', 'https://evil.example/?proxy=:8096/',
+    'http://127.0.0.1.evil.example:8096/v1', 'http://127.0.0.1:8096@evil.example/v1',
+    'http://user:secret@127.0.0.1:8096/v1', 'http://@127.0.0.1:8096/v1',
+    'ftp://127.0.0.1:8096/v1', 'file:///memory', 'not a URL', 'http://',
+    'http:127.0.0.1:8096', '//127.0.0.1:8096', '', undefined,
+  ])('rejects untrusted, spoofed, credentialed or malformed request %j', baseURL => {
+    expect(isMemoryChain(baseURL)).toBe(false)
   })
 
-  it('does not match a port that merely starts with 8096', () => {
-    expect(isMemoryChain('http://127.0.0.1:80961/v1')).toBe(false)
-    expect(isMemoryChain('http://127.0.0.1:18096/v1')).toBe(false)
+  it('denies every request for an explicit empty allowlist', () => {
+    expect(isMemoryChain('http://127.0.0.1:8096/v1', [])).toBe(false)
   })
 
-  it('does not match a path segment that happens to be named memory', () => {
-    expect(isMemoryChain('https://example.com/memory/v1')).toBe(false)
-  })
-
-  it('answers false for an absent or empty base URL', () => {
-    expect(isMemoryChain(undefined)).toBe(false)
-    expect(isMemoryChain('')).toBe(false)
+  it.each(['https://example.com/path', 'https://user@example.com', 'https://example.com/?q=1', 'https://example.com/#tag'])('does not derive trust from an invalid configured origin %j', origin => {
+    expect(isMemoryChain('https://example.com/v1', [origin])).toBe(false)
   })
 })
 
@@ -390,61 +504,56 @@ describe('identityHeaders', () => {
       .toEqual({ 'X-Team': 'T', 'X-Agent': 'A', 'X-Task': 'K' })
   })
 
-  it('appends extra rows verbatim, later names winning on an exact clash', () => {
+  it('appends extra rows verbatim without touching the identity triple', () => {
     const headers = identityHeaders(identity({
-      headers: [
-        { name: 'X-Extra', value: ' spaced ' },
-        { name: 'x-team-id', value: 'override' },
-      ],
+      headers: [{ name: 'X-Extra', value: ' spaced ' }],
     }), NAMES)
-    expect(headers).toEqual({ 'x-team-id': 'override', 'x-agent-id': 'agent-a', 'x-task-id': 'task-a', 'X-Extra': ' spaced ' })
+    expect(headers).toEqual({ 'x-team-id': 'team-a', 'x-agent-id': 'agent-a', 'x-task-id': 'task-a', 'X-Extra': ' spaced ' })
+  })
+
+  it('drops a row that reuses a configured header name instead of overwriting it', () => {
+    // HTTP header names are case-insensitive: keeping both spellings would put
+    // two values on the wire for one header. The identity's own field wins, and
+    // validation reports `name-conflict` so the editor shows the problem.
+    const headers = identityHeaders(identity({
+      headers: [{ name: 'X-Team-Id', value: 'override' }],
+    }), NAMES)
+    expect(headers).toEqual({ 'x-team-id': 'team-a', 'x-agent-id': 'agent-a', 'x-task-id': 'task-a' })
+  })
+
+  it('sends at most one value per header name across the configured triple', () => {
+    // `assertValidSection` rejects case-duplicate names, but the composition
+    // base only warns, so composition must not emit two values for one header.
+    // team wins over agent over task, deterministically.
+    const headers = identityHeaders(identity({ team: 'team-a', agent: 'agent-a', task: 'task-a' }),
+      { team: 'X-Same', agent: 'x-same', task: 'x-task-id' })
+    expect(headers).toEqual({ 'X-Same': 'team-a', 'x-task-id': 'task-a' })
+  })
+
+  it('never writes an identity value under the session header, whatever the switch', () => {
+    // The composition base is only warned about at startup, so this is the one
+    // path that can reach composition with a colliding configured name. With
+    // the switch off a constant value there would become the conversation key
+    // and merge every session into one proxy conversation.
+    const colliding = { team: DSH_SESSION_HEADER, agent: 'x-agent-id', task: 'x-task-id' }
+    const withSwitchOn = identityHeaders(identity({ team: 'team-a', agent: 'agent-a', task: 'task-a' }), colliding)
+    expect(withSwitchOn).toEqual({ 'x-agent-id': 'agent-a', 'x-task-id': 'task-a' })
+
+    const agentNameCollided = identityHeaders(identity({ team: 'team-a', agent: 'agent-a', task: 'task-a' }),
+      { team: 'x-team-id', agent: DSH_SESSION_HEADER.toUpperCase(), task: 'x-task-id' })
+    expect(agentNameCollided).toEqual({ 'x-team-id': 'team-a', 'x-task-id': 'task-a' })
+  })
+
+  it('keeps exactly one value when rows repeat a name, first spelling winning', () => {
+    const headers = identityHeaders(identity({
+      headers: [{ name: 'x-dup', value: 'one' }, { name: 'X-Dup', value: 'two' }],
+    }), NAMES)
+    expect(headers).toEqual({ 'x-dup': 'one', 'x-team-id': 'team-a', 'x-agent-id': 'agent-a', 'x-task-id': 'task-a' })
   })
 
   it('ignores extra rows without a name', () => {
     expect(identityHeaders(identity({ headers: [{ name: '  ', value: 'v' }] }), NAMES))
       .toEqual({ 'x-team-id': 'team-a', 'x-agent-id': 'agent-a', 'x-task-id': 'task-a' })
-  })
-})
-
-describe('estimateTokens', () => {
-  it('answers zero for no messages', () => {
-    expect(estimateTokens([])).toBe(0)
-  })
-
-  it('counts latin text at roughly four characters per token plus per-message overhead', () => {
-    expect(estimateTokens([{ role: 'user', content: 'abcd' }])).toBe(9)
-    expect(estimateTokens([{ role: 'user', content: 'abcde' }])).toBe(10)
-    expect(estimateTokens([{ role: 'user', content: '' }])).toBe(8)
-  })
-
-  it('counts CJK characters as denser than latin', () => {
-    // 20 CJK characters ≈ 15 tokens; 20 latin characters = 5 tokens.
-    expect(estimateTokens([{ content: '你好世界你好世界你好世界你好世界你好世界' }])).toBe(23)
-    expect(estimateTokens([{ content: 'abcdefghijklmnopqrst' }])).toBe(13)
-  })
-
-  it('counts kana, hangul and fullwidth forms as CJK', () => {
-    expect(estimateTokens([{ content: 'あいうえ' }])).toBe(3 + 8)
-    expect(estimateTokens([{ content: '한국어' }])).toBe(3 + 8)
-    expect(estimateTokens([{ content: 'ＡＢＣＤ' }])).toBe(3 + 8)
-  })
-
-  it('reads text blocks of array content and ignores non-text blocks', () => {
-    expect(estimateTokens([{
-      content: [
-        { type: 'text', text: 'abcd' },
-        { type: 'image', source: { data: 'x'.repeat(1000) } },
-        { type: 'text', text: 'efgh' },
-      ],
-    }])).toBe(2 + 8)
-  })
-
-  it('skips non-record messages but still counts their per-message overhead', () => {
-    expect(estimateTokens([null, 'garbage', { content: 'abcd' }])).toBe(1 + 3 * 8)
-  })
-
-  it('ignores non-text content and non-string block text', () => {
-    expect(estimateTokens([{ content: 42 }, { content: [{ text: 42 }] }])).toBe(2 * 8)
   })
 })
 

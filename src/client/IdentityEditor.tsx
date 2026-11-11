@@ -68,6 +68,9 @@ function issueKey(code: IdentityIssue['code']): MgKey {
     case 'team-empty': return 'issueTeamEmpty'
     case 'name-empty': return 'issueNameEmpty'
     case 'name-invalid': return 'issueNameInvalid'
+    case 'name-reserved': return 'issueNameReserved'
+    case 'name-conflict': return 'issueNameConflict'
+    case 'name-duplicate': return 'issueNameDuplicate'
     case 'value-invalid': return 'issueValueInvalid'
   }
 }

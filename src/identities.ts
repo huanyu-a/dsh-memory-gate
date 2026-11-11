@@ -2,7 +2,7 @@
  * Pure memory-gate logic shared by the host and browser halves: the identity
  * section shape, its validation (case-insensitive id uniqueness, Fetch-valid
  * header names), the per-model pick, call-time header assembly, memory-chain
- * recognition and the request-size estimator the budget gate uses.
+ * recognition and call-time header assembly.
  *
  * No Cordis, no DOM, no Node APIs — every function here is unit-testable in
  * isolation and safe to import from the browser half.
@@ -11,10 +11,13 @@
  */
 
 import {
+  CONFIGURED_HEADER_FIELDS,
+  RESERVED_TRANSPORT_HEADERS,
   DEFAULT_AGENT_HEADER,
   DEFAULT_TASK_HEADER,
   DEFAULT_TEAM_HEADER,
-  MEMORY_CHAIN_URL_PATTERNS,
+  DSH_SESSION_HEADER,
+  DEFAULT_TRUSTED_ORIGINS,
 } from './constants.js'
 
 /** One extra header row of an identity, exactly as the editor stages it. */
@@ -57,25 +60,14 @@ export interface HeaderNames {
   task: string
 }
 
-/** The per-session budget gate: detach memory once a conversation is large. */
-export interface BudgetConfig {
-  /** Whether the gate runs at all. Off by default: it changes memory behaviour. */
-  enabled: boolean
-  /**
-   * Detach memory once the first observed request of a session is estimated
-   * above this many tokens. The estimate is deliberately coarse (see
-   * {@link estimateTokens}) — it is a guard rail, not a tokenizer.
-   */
-  maxRequestTokens: number
-}
-
 /** The `memory-gate` settings section this plugin owns. */
 export interface MemoryGateSection {
   identities: IdentityProfile[]
+  /** Exact HTTP(S) origins permitted to receive identity and session headers; [] denies all. */
+  trustedOrigins: string[]
   /** Identity id every model inherits unless it names another one; empty = no default. */
   defaultIdentity: string
   headerNames: HeaderNames
-  budget: BudgetConfig
   /**
    * Whether to send {@link DSH_SESSION_HEADER}. The TDAI proxy keys a
    * conversation by it, so sending it turns DSH's session into the proxy's
@@ -89,9 +81,9 @@ export interface MemoryGateSection {
 export function defaultSection(): MemoryGateSection {
   return {
     identities: [],
+    trustedOrigins: [...DEFAULT_TRUSTED_ORIGINS],
     defaultIdentity: '',
     headerNames: { team: DEFAULT_TEAM_HEADER, agent: DEFAULT_AGENT_HEADER, task: DEFAULT_TASK_HEADER },
-    budget: { enabled: false, maxRequestTokens: 120_000 },
     sessionHeader: true,
   }
 }
@@ -102,8 +94,9 @@ export interface IdentityIssue {
   identity: number
   /** Index of the offending header row; absent for identity-level findings. */
   row?: number
-  code: 'id-empty' | 'id-duplicate' | 'team-empty' | 'name-empty' | 'name-invalid' | 'value-invalid'
-  /** Offending value, echoed for diagnostics; for `value-invalid` the header NAME (the raw value may be unprintable). */
+  code: 'id-empty' | 'id-duplicate' | 'team-empty' | 'name-empty' | 'name-invalid' | 'name-reserved'
+    | 'name-conflict' | 'name-duplicate' | 'value-invalid'
+  /** Offending value; for `value-invalid`, only the field/header name, never its potentially secret value. */
   value: string
 }
 
@@ -153,21 +146,19 @@ export function normalizeSection(value: unknown): MemoryGateSection {
     ? value['identities'].map(identityFromUnknown)
     : []
   const names = isRecord(value['headerNames']) ? value['headerNames'] : {}
-  const budget = isRecord(value['budget']) ? value['budget'] : {}
-  const maxRequestTokens = budget['maxRequestTokens']
   return {
     identities,
+    // Preserve invalid entries for validation rather than silently trusting the default.
+    trustedOrigins: value['trustedOrigins'] === undefined
+      ? base.trustedOrigins
+      : Array.isArray(value['trustedOrigins'])
+        ? value['trustedOrigins'].map(origin => typeof origin === 'string' ? trustedOrigin(origin) ?? origin : '')
+        : [''],
     defaultIdentity: typeof value['defaultIdentity'] === 'string' ? value['defaultIdentity'] : '',
     headerNames: {
       team: nonEmptyString(names['team']) ?? base.headerNames.team,
       agent: nonEmptyString(names['agent']) ?? base.headerNames.agent,
       task: nonEmptyString(names['task']) ?? base.headerNames.task,
-    },
-    budget: {
-      enabled: budget['enabled'] === true,
-      maxRequestTokens: typeof maxRequestTokens === 'number' && Number.isFinite(maxRequestTokens) && maxRequestTokens > 0
-        ? Math.floor(maxRequestTokens)
-        : base.budget.maxRequestTokens,
     },
     sessionHeader: value['sessionHeader'] === false ? false : base.sessionHeader,
   }
@@ -176,7 +167,8 @@ export function normalizeSection(value: unknown): MemoryGateSection {
 /** Validate one identity list, returning every finding (empty when valid). */
 export function validateIdentities(section: MemoryGateSection): IdentityIssue[] {
   const issues: IdentityIssue[] = []
-  const seen = new Map<string, number>()
+  // These ids are model-pick sentinels, not selectable named identities.
+  const seen = new Set(['off', 'default'])
   section.identities.forEach((identity, at) => {
     const id = identity.id.trim()
     if (id.length === 0) {
@@ -184,9 +176,13 @@ export function validateIdentities(section: MemoryGateSection): IdentityIssue[] 
     } else {
       const key = id.toLowerCase()
       if (seen.has(key)) issues.push({ identity: at, code: 'id-duplicate', value: id })
-      else seen.set(key, at)
+      else seen.add(key)
     }
     if (identity.team.trim().length === 0) issues.push({ identity: at, code: 'team-empty', value: id })
+    for (const field of ['team', 'agent', 'task'] as const) {
+      if (!fetchAcceptsValue(identity[field])) issues.push({ identity: at, code: 'value-invalid', value: field })
+    }
+    const seenNames = new Set<string>()
     identity.headers.forEach((entry, row) => {
       const name = entry.name.trim()
       if (name.length === 0) {
@@ -197,8 +193,25 @@ export function validateIdentities(section: MemoryGateSection): IdentityIssue[] 
       }
       if (!fetchAcceptsName(name)) {
         issues.push({ identity: at, row, code: 'name-invalid', value: name })
+      } else if (CONFIGURED_HEADER_FIELDS.some(field => section.headerNames[field].toLowerCase() === name.toLowerCase())) {
+        // The identity's own team/agent/task header would be overwritten by
+        // this row, so the value shown in the editor would not be the value on
+        // the wire. Reject it instead of silently preferring one of the two.
+        issues.push({ identity: at, row, code: 'name-conflict', value: name })
+      } else if (name.toLowerCase() === DSH_SESSION_HEADER.toLowerCase()) {
+        // The session header is the conversation key. A configurable row must
+        // never supply it: with the session-header switch off, one constant
+        // value would merge every session into a single proxy conversation.
+        issues.push({ identity: at, row, code: 'name-reserved', value: name })
+      } else if (seenNames.has(name.toLowerCase())) {
+        // Two rows on one name would either silently drop the first value or,
+        // when the casing differs, put two values on the wire for one header
+        // (HTTP names are case-insensitive).
+        issues.push({ identity: at, row, code: 'name-duplicate', value: name })
       } else if (!fetchAcceptsValue(entry.value)) {
         issues.push({ identity: at, row, code: 'value-invalid', value: name })
+      } else {
+        seenNames.add(name.toLowerCase())
       }
     })
   })
@@ -212,6 +225,30 @@ export function validateIdentities(section: MemoryGateSection): IdentityIssue[] 
  * @param section - the resolved section.
  */
 export function assertValidSection(section: MemoryGateSection): void {
+  if (!Array.isArray(section.trustedOrigins) || section.trustedOrigins.some(origin => trustedOrigin(origin) === undefined)) {
+    throw new Error('memory-gate: trustedOrigins must contain only HTTP(S) origins without credentials, query, hash, or path')
+  }
+  const seenNames = new Set<string>()
+  for (const field of ['team', 'agent', 'task'] as const) {
+    const name = section.headerNames[field]
+    if (!fetchAcceptsName(name)) {
+      throw new Error(`memory-gate: headerNames.${field} must be a valid HTTP header name`)
+    }
+    const key = name.toLowerCase()
+    if (seenNames.has(key)) {
+      throw new Error(`memory-gate: headerNames.${field} duplicates another configured header name (names are case-insensitive)`)
+    }
+    if (key === DSH_SESSION_HEADER.toLowerCase()) {
+      throw new Error(`memory-gate: headerNames.${field} collides with the reserved session header "${DSH_SESSION_HEADER}"`)
+    }
+    if (RESERVED_TRANSPORT_HEADERS.includes(key)) {
+      throw new Error(`memory-gate: headerNames.${field} must not be "${name}": a transport header there would overwrite the caller's own value on attach and be deleted on detach`)
+    }
+    seenNames.add(key)
+  }
+  if (section.defaultIdentity.trim().length > 0 && findIdentity(section, section.defaultIdentity) === undefined) {
+    throw new Error('memory-gate: defaultIdentity must name a configured identity')
+  }
   const issue = validateIdentities(section)[0]
   if (issue === undefined) return
   const where = issue.row === undefined
@@ -219,13 +256,55 @@ export function assertValidSection(section: MemoryGateSection): void {
     : `identity #${String(issue.identity + 1)} header row #${String(issue.row + 1)}`
   const reason = {
     'id-empty': 'needs an id',
-    'id-duplicate': `duplicates the id "${issue.value}" (ids are case-insensitive)`,
+    'id-duplicate': ['off', 'default'].includes(issue.value.toLowerCase())
+      ? `uses the reserved model-pick id "${issue.value}"`
+      : `duplicates the id "${issue.value}" (ids are case-insensitive)`,
     'team-empty': 'needs a team id: the proxy treats a teamless request as unidentified and can never inject memory for it',
     'name-empty': 'has a value but no header name',
     'name-invalid': `uses "${issue.value}", which is not a representable HTTP header name`,
+    'name-reserved': `uses "${issue.value}", the header that carries the session id: a configured row must not choose the conversation key`,
+    'name-conflict': `uses "${issue.value}", which is also the header name the identity's own team/agent/task field is sent under: the row would silently replace that value`,
+    'name-duplicate': `repeats the header name "${issue.value}" (names are case-insensitive): only one of the two values could ever be sent`,
     'value-invalid': `has a value that cannot be sent as an HTTP header ("${issue.value}")`,
   }[issue.code]
   throw new Error(`memory-gate: ${where} ${reason}`)
+}
+
+/**
+ * Validate one attachment's values with exactly the rules the settings write
+ * path enforces, so a value that could never be saved cannot be frozen into a
+ * pin either. Returns the human reason when invalid, undefined when the values
+ * are safe to persist and replay verbatim.
+ * @param identity - the identity to pin.
+ * @param names - the header names it will be sent under.
+ */
+export function pinnedValuesIssue(identity: IdentityProfile, names: HeaderNames): string | undefined {
+  try {
+    assertValidSection({
+      ...defaultSection(),
+      identities: [identity],
+      defaultIdentity: identity.id,
+      // The header names are part of the pinned values, so validate them too:
+      // a snapshot may not key the conversation through the reserved session
+      // header, collide two triples, or carry an unrepresentable name.
+      headerNames: { ...names },
+    })
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/**
+ * Validate the three configured header names on their own, with the same rules
+ * the settings write path applies. Callers that persist names for later
+ * deletion use this so they never store a triple the loader would refuse.
+ * @param names - the header names to check.
+ * @returns the human reason when invalid, undefined when the names are usable.
+ */
+export function headerNamesIssue(names: HeaderNames): string | undefined {
+  const probe: IdentityProfile = { id: 'probe', team: 'probe', agent: '', task: '', headers: [] }
+  return pinnedValuesIssue(probe, names)
 }
 
 /** The identity named by `id` (case-insensitive), or undefined. */
@@ -274,15 +353,34 @@ export function providerBaseURL(providers: unknown, route: string): string | und
   return typeof baseURL === 'string' && baseURL.trim().length > 0 ? baseURL.trim() : undefined
 }
 
-/**
- * Whether a provider base URL sits behind the TDAI memory proxy. Only that
- * route reads identity headers; a direct public route ignores them, so the
- * gate adds nothing there.
- * @param baseURL - the provider profile's base URL, if any.
- */
-export function isMemoryChain(baseURL: string | undefined): boolean {
-  if (baseURL === undefined || baseURL.length === 0) return false
-  return MEMORY_CHAIN_URL_PATTERNS.some(pattern => pattern.test(baseURL))
+/** Parse an HTTP(S) URL without credentials, rejecting non-URL and control-character input. */
+function requestURL(value: unknown): URL | undefined {
+  if (typeof value !== 'string' || !/^https?:\/\//i.test(value) || /[\s\\]/.test(value)) return undefined
+  try {
+    const url = new URL(value)
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username) return undefined
+    // Even empty userinfo is not an approved request URL.
+    if (value.slice(value.indexOf('//') + 2).split(/[/?#]/, 1)[0]?.includes('@')) return undefined
+    return url
+  } catch {
+    return undefined
+  }
+}
+
+/** Normalize a configured origin, permitting only an optional trailing slash. */
+function trustedOrigin(value: unknown): string | undefined {
+  const url = requestURL(value)
+  if (!url || typeof value !== 'string' || url.pathname !== '/' || value.includes('?') || value.includes('#')) return undefined
+  // Inspect the raw suffix too: URL parsing otherwise erases dot segments.
+  const suffix = value.slice(value.indexOf('//') + 2).replace(/^[^/]+/, '')
+  return suffix === '' || suffix === '/' ? url.origin : undefined
+}
+
+/** Match only an explicitly trusted origin; path/hostname heuristics never grant trust. */
+export function isMemoryChain(baseURL: string | undefined, trustedOrigins: readonly string[] = DEFAULT_TRUSTED_ORIGINS): boolean {
+  const url = requestURL(baseURL)
+  if (!url || !Array.isArray(trustedOrigins)) return false
+  return trustedOrigins.some(origin => trustedOrigin(origin) === url.origin)
 }
 
 /**
@@ -294,63 +392,57 @@ export function isMemoryChain(baseURL: string | undefined): boolean {
  */
 export function identityHeaders(identity: IdentityProfile, names: HeaderNames): Record<string, string> {
   const headers: Record<string, string> = {}
+  for (const entry of identity.headers) {
+    const name = entry.name.trim()
+    // The session header is the conversation key. It is enforced at every write
+    // path, but this function is also reachable with a composition-base value
+    // that bypassed validation, so the reservation is re-asserted here: a
+    // constant key would merge every session into one proxy conversation.
+    // Drop a row that reuses a configured or session header name: HTTP names
+    // are case-insensitive, so keeping both would put two values on the wire
+    // for one header. Validation rejects such rows; this guards the path that
+    // bypassed it.
+    const owned = CONFIGURED_HEADER_FIELDS.some(field => names[field].toLowerCase() === name.toLowerCase())
+    if (name.length === 0 || owned || name.toLowerCase() === DSH_SESSION_HEADER.toLowerCase()) continue
+    // One value per name: a repeated row is rejected by validation, and the
+    // first spelling wins here so a bypassed config still sends one header.
+    if (Object.keys(headers).some(key => key.toLowerCase() === name.toLowerCase())) continue
+    headers[name] = entry.value
+  }
+  // The identity's own fields are written last so they win: validation rejects
+  // a row that reuses one of these names (`name-conflict`), and a value that
+  // slipped past validation must still not replace the team/agent/task the
+  // editor shows.
   const team = identity.team.trim()
   const agent = identity.agent.trim()
   const task = identity.task.trim()
-  if (team.length > 0) headers[names.team] = team
-  if (agent.length > 0) headers[names.agent] = agent
-  if (task.length > 0) headers[names.task] = task
-  for (const entry of identity.headers) {
-    const name = entry.name.trim()
-    if (name.length > 0) headers[name] = entry.value
+  // A configured name equal to the session header is rejected at every write
+  // path, but the composition base only produces a startup warning and is still
+  // used. Writing the team value there with the session-header switch off would
+  // make one constant value the conversation key, merging every session into a
+  // single proxy conversation; with the switch on it would drop the team
+  // instead. Neither is acceptable, so the name is treated as unusable and the
+  // request simply carries no identity header (the proxy then injects nothing).
+  const usable = (name: string): boolean => {
+    const key = name.toLowerCase()
+    return key !== DSH_SESSION_HEADER.toLowerCase() && !RESERVED_TRANSPORT_HEADERS.includes(key)
   }
+  // One value per header name: the three configured names are validated to be
+  // distinct, but that check lives in `assertValidSection`, which the
+  // composition base only reaches as a startup warning. Two names differing
+  // only by case would otherwise put two values on one header.
+  const used = new Set<string>()
+  const place = (name: string, value: string): void => {
+    if (value.length === 0 || !usable(name)) return
+    const key = name.toLowerCase()
+    if (used.has(key)) return
+    used.add(key)
+    headers[name] = value
+  }
+  place(names.team, team)
+  place(names.agent, agent)
+  place(names.task, task)
   return headers
-}
-
-/**
- * Estimate a request's token count from its message array. Coarse on purpose:
- * the budget gate only needs to answer "is this conversation already large",
- * and a real tokenizer would tie the plugin to one model family.
- *
- * Heuristic: every CJK character counts as ~0.75 token, every other 4
- * characters as one token, plus a fixed per-message overhead.
- * @param messages - model-visible messages, optionally with block content.
- */
-export function estimateTokens(messages: readonly unknown[]): number {
-  let cjk = 0
-  let other = 0
-  const add = (text: string): void => {
-    for (const char of text) {
-      const code = char.codePointAt(0) ?? 0
-      if (isCJK(code)) cjk++
-      else other++
-    }
-  }
-  for (const message of messages) {
-    if (!isRecord(message)) continue
-    const content = message['content']
-    if (typeof content === 'string') add(content)
-    else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (!isRecord(block)) continue
-        const text = block['text']
-        if (typeof text === 'string') add(text)
-      }
-    }
-  }
-  return Math.ceil(cjk * 0.75 + other / 4) + messages.length * 8
-}
-
-/** Whether one code point is in a CJK block the estimator treats as dense. */
-function isCJK(code: number): boolean {
-  return (
-    (code >= 0x3040 && code <= 0x30ff) || // kana
-    (code >= 0x3400 && code <= 0x4dbf) || // CJK ext A
-    (code >= 0x4e00 && code <= 0x9fff) || // CJK unified
-    (code >= 0xac00 && code <= 0xd7af) || // hangul syllables
-    (code >= 0xf900 && code <= 0xfaff) || // CJK compatibility
-    (code >= 0xff00 && code <= 0xffef) // fullwidth forms
-  )
 }
 
 /** Whether a value is a plain record. */

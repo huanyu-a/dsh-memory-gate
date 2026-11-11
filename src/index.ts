@@ -4,19 +4,16 @@
  * Two jobs:
  *   1. Own the `memory-gate` configuration: named memory identities (the
  *      TDAI proxy's `x-team-id` / `x-agent-id` / `x-task-id` triple plus extra
- *      headers), the default identity, the header names, the per-session
- *      budget gate and the harness-session header switch. Where the data
+ *      headers), the default identity, the header names and the
+ *      harness-session header switch. Where the data
  *      lives depends on the host generation:
  *        - DSH 0.1.7+: the plugin entry's volatile config fields, persisted in
  *          the profile's cordis patch and edited live; and
  *        - DSH 0.1.5: the `memory-gate` settings namespace, registered with
  *          write-time validation and persisted in the user settings document.
- *   2. Decide, per request, whether it carries a memory identity. The decision
- *      runs on two harness waterfalls:
- *        - `llm/stream` observes every request (messages, provider, model,
- *          session id) and feeds the budget estimator; and
- *        - `llm-pi-ai/request-headers` is the synchronous, per-inference header
- *          seam where the decision becomes wire headers.
+ *   2. Decide, per request, whether it carries a memory identity, on the
+ *      synchronous `llm-pi-ai/request-headers` waterfall — the per-inference
+ *      seam where the decision becomes wire headers.
  *      The first decision of a session id is pinned (see gate.ts): the TDAI
  *      proxy's `bypassed` state is terminal, so a session must never flip
  *      between identified and unidentified requests.
@@ -30,7 +27,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the webServer/llm/settings service merges into this program's Context.
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-settings'
 // Type-only: declares the `llm-pi-ai/request-headers` event this plugin listens to.
 import type { PiAiRequestHeaderContext } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -43,8 +40,6 @@ import {
   normalizeSection,
   providerBaseURL,
   assertValidSection,
-  estimateTokens,
-  type BudgetConfig,
   type HeaderEntry,
   type HeaderNames,
   type IdentityProfile,
@@ -82,11 +77,6 @@ const headerNames: Schema<HeaderNames> = Schema.object({
   task: Schema.string().default(defaultSection().headerNames.task),
 })
 
-const budget: Schema<BudgetConfig> = Schema.object({
-  enabled: Schema.boolean().default(false),
-  maxRequestTokens: Schema.number().default(defaultSection().budget.maxRequestTokens),
-})
-
 /**
  * A live configuration cell: DSH 0.1.7 wraps `.volatile()` Config fields in
  * one of these so edits apply without remounting the plugin fiber; DSH 0.1.5
@@ -105,10 +95,10 @@ export interface Config {
   defaultIdentity?: string | VolatileLike<string>
   /** Composition-base header names (default the proxy's own names). */
   headerNames?: HeaderNames | VolatileLike<HeaderNames>
-  /** Composition-base budget gate (default disabled). */
-  budget?: BudgetConfig | VolatileLike<BudgetConfig>
   /** Whether to send the harness session header (default true). */
   sessionHeader?: boolean | VolatileLike<boolean>
+  /** Origins allowed to receive memory identity headers. */
+  trustedOrigins?: string[] | VolatileLike<string[]>
 }
 
 /**
@@ -144,8 +134,8 @@ export const Config = Schema.object({
   identities: live(Schema.array(identity).default([])),
   defaultIdentity: live(Schema.string().default('')),
   headerNames,
-  budget,
   sessionHeader: live(Schema.boolean().default(true)),
+  trustedOrigins: live(Schema.array(Schema.string()).default(['http://127.0.0.1:8096'])),
 })
 
 // ---- settings structural faces (compile-time privacy only; every access
@@ -193,37 +183,55 @@ function volatileRead<T>(value: T | VolatileLike<T> | undefined): T | undefined 
   return value as T | undefined
 }
 
-/** The `llm/stream` request shape this plugin observes. */
-interface StreamOptionsLike {
-  provider?: unknown
-  model?: unknown
-  sessionId?: unknown
-  messages?: unknown
-}
-
-/** Coarse token estimate per session id, refreshed by every observed request. */
-interface TokenStat {
-  tokens: number
-  at: number
-}
-
-/** How many sessions keep a live token estimate. */
-const MAX_TOKEN_SESSIONS = 512
-
 /**
  * Apply the plugin.
  * @param ctx - host context.
  * @param config - the cordis row's config block (composition base).
  */
+/**
+ * Diagnostic output that can never fail the call.
+ *
+ * The gate's one promise is "a broken gate means no identity headers, never a
+ * broken model call". A bare `console.warn` in the catch block breaks that
+ * promise: when the host's stdout/stderr is gone (EPIPE on a closed pipe, a
+ * detached console, a broken log redirect) the write throws, the exception
+ * escapes the waterfall listener, and `return next()` never runs — so the
+ * request fails *because* the gate tried to report a problem. Every diagnostic
+ * on the request path goes through here.
+ *
+ * @param level - which console channel to use.
+ * @param message - the already-formatted line.
+ */
+function report(level: 'warn' | 'info', message: string): void {
+  try {
+    if (level === 'warn') console.warn(message)
+    else console.info(message)
+  } catch {
+    // Losing a log line is acceptable; losing the model call is not.
+  }
+}
+
 export function apply(ctx: Context, config: Config = {}): void {
   /** The default section from the composition base (no editor layer). */
   const baseSection = (): MemoryGateSection => normalizeSection({
     identities: volatileRead(config.identities) ?? [],
     defaultIdentity: volatileRead(config.defaultIdentity) ?? '',
     headerNames: volatileRead(config.headerNames),
-    budget: volatileRead(config.budget),
     sessionHeader: volatileRead(config.sessionHeader),
+    trustedOrigins: volatileRead(config.trustedOrigins),
   })
+
+  /**
+   * Report an unusable composition base once at startup. The base is not a
+   * settings write, so it never passes the `validate` hook: without this an
+   * operator would only see the symptom (missing identity headers) and never
+   * the cause. Never throws — a broken base must still fail open per request.
+   */
+  try {
+    assertValidSection(baseSection())
+  } catch (error) {
+    report('warn', `[memory-gate] composition base is invalid; fix the memory-gate config block: ${error instanceof Error ? error.message : String(error)}`)
+  }
 
   const settings = ctx.settings as unknown as SettingsFace | undefined
   const runtimeContext = ctx as unknown as { get?(name: string): unknown }
@@ -321,21 +329,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     void flushDecisionLog(dir)
   }, 'memory-gate: flush decision log')
 
-  /** Tel estimate per session, fed by `llm/stream`. */
-  const tokenStats = new Map<string, TokenStat>()
-  const rememberTokens = (sessionId: string, tokens: number, at: number): void => {
-    tokenStats.set(sessionId, { tokens, at })
-    if (tokenStats.size <= MAX_TOKEN_SESSIONS) return
-    const ordered = [...tokenStats.entries()].sort((a, b) => b[1].at - a[1].at).slice(0, MAX_TOKEN_SESSIONS)
-    tokenStats.clear()
-    for (const [key, stat] of ordered) tokenStats.set(key, stat)
-  }
-
   /** Sessions already announced on the console (one line per session, not per request). */
   const announced = new Set<string>()
 
   /** Append one structured decision line for the on-disk log. */
-  const logDecision = (decision: GateDecision, request: GateRequest, tokens: number | undefined): void => {
+  const logDecision = (decision: GateDecision, request: GateRequest): void => {
     appendDecisionLog(dir, JSON.stringify({
       ts: new Date().toISOString(),
       kind: decision.kind,
@@ -344,25 +342,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       model: request.model,
       session: request.sessionId ?? null,
       identity: decision.identity?.id ?? null,
-      tokens: tokens ?? null,
       chain: request.baseURL ?? null,
     }))
   }
-
-  // Observe every request's size: the budget gate needs to know how large a
-  // conversation already is before the proxy appends memory to it.
-  ctx.on('llm/stream', function (options: StreamOptionsLike, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
-    try {
-      const sessionId = typeof options.sessionId === 'string' ? options.sessionId : undefined
-      const messages = Array.isArray(options.messages) ? options.messages : undefined
-      if (sessionId !== undefined && messages !== undefined) {
-        rememberTokens(sessionId, estimateTokens(messages), Date.now())
-      }
-    } catch (error) {
-      console.warn(`[memory-gate] request observation skipped: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    return next()
-  })
 
   // The synchronous per-inference header seam: decide and stamp.
   ctx.on('llm-pi-ai/request-headers', function (
@@ -387,7 +369,6 @@ export function apply(ctx: Context, config: Config = {}): void {
         baseURL,
         sessionId,
         pinnable: context.purpose === undefined,
-        estimatedTokens: sessionId === undefined ? undefined : tokenStats.get(sessionId)?.tokens,
       }
       const decision = decideGate({
         request,
@@ -409,6 +390,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       // the write-time validator) must not cost the request its identity
       // triple and session header.
       const dropped: string[] = []
+      for (const name of decision.removeHeaders ?? []) {
+        try {
+          headers.delete(name)
+        } catch {
+          dropped.push(name)
+        }
+      }
       for (const [name, value] of Object.entries(decision.headers)) {
         try {
           headers.set(name, value)
@@ -417,16 +405,16 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
       }
       if (dropped.length > 0) {
-        console.warn(`[memory-gate] gate skipped ${String(dropped.length)} unstampable header row: ${dropped.join(', ')}`)
+        report('warn', `[memory-gate] gate skipped ${String(dropped.length)} unstampable header row: ${dropped.join(', ')}`)
       }
-      logDecision(decision, request, request.estimatedTokens)
+      logDecision(decision, request)
       if (!announced.has(sessionId ?? `${provider}/${model}`)) {
         announced.add(sessionId ?? `${provider}/${model}`)
-        console.info(`[memory-gate] ${describeDecision(decision, request)}`)
+        report('info', `[memory-gate] ${describeDecision(decision, request)}`)
       }
     } catch (error) {
       // Fail open: a broken gate means "no identity headers", never a broken call.
-      console.warn(`[memory-gate] gate skipped: ${error instanceof Error ? error.message : String(error)}`)
+      report('warn', `[memory-gate] gate skipped: ${error instanceof Error ? error.message : String(error)}`)
     }
     return next()
   })
@@ -436,7 +424,6 @@ export { MEMORY_GATE_NS, PI_AI_NS, PLUGIN_ID } from './constants.js'
 export {
   assertValidSection,
   defaultSection,
-  estimateTokens,
   findIdentity,
   identityFromUnknown,
   isMemoryChain,
@@ -447,7 +434,6 @@ export {
   validateIdentities,
 } from './identities.js'
 export type {
-  BudgetConfig,
   HeaderEntry,
   HeaderNames,
   IdentityIssue,
@@ -457,3 +443,6 @@ export type {
 } from './identities.js'
 export { decideGate, describeDecision } from './gate.js'
 export type { GateDecision, GateRequest, SessionPin } from './gate.js'
+// Exported for the maintenance CLI (scripts/session-pins.mjs), which must read
+// exactly the directory the plugin writes — a second copy of this rule drifts.
+export { storeDir } from './store.js'

@@ -53,20 +53,15 @@ console.log('4 pin wins     ', JSON.stringify(hdr({ ...base, sessionId: 's-1' })
 configure({ identities: [worker], defaultIdentity: 'worker' }, [{ id: 'auto/DeepSeek-Flash' }])
 console.log('5 aux attaches ', JSON.stringify(hdr({ ...base, sessionId: 's-3', purpose: 'session-title' })))
 
-configure(
-  { identities: [worker], defaultIdentity: 'worker', budget: { enabled: true, maxRequestTokens: 10 } },
-  [{ id: 'auto/DeepSeek-Flash' }],
-)
-L['llm/stream'][0](
-  { provider: 'magpie', model: 'auto/DeepSeek-Flash', sessionId: 's-4', messages: [{ role: 'user', content: 'x'.repeat(4000) }] },
-  () => (async function* () {})(),
-)
-console.log('6 budget detach', JSON.stringify(hdr({ ...base, sessionId: 's-4' })))
-console.log('7 small session', JSON.stringify(hdr({ ...base, sessionId: 's-5' })))
+console.log('6 new session  ', JSON.stringify(hdr({ ...base, sessionId: 's-5' })))
 
 configure({ identities: [], defaultIdentity: '' }, [{ id: 'auto/DeepSeek-Flash' }])
-console.log('8 identity gone', JSON.stringify(hdr({ ...base, sessionId: 's-5' })))
-console.log('9 no default   ', JSON.stringify(hdr({ ...base, sessionId: 's-6' })))
+// A snapshotted pin keeps reproducing the values it was created with, so
+// deleting the identity no longer retires a live session.
+console.log('7 snapshot pin ', JSON.stringify(hdr({ ...base, sessionId: 's-5' })))
+console.log('8 new detached ', JSON.stringify(hdr({ ...base, sessionId: 's-6' })))
+// Session s-6 has no pin: a new request under the emptied config detaches.
+console.log('9 no default   ', JSON.stringify(hdr({ ...base, sessionId: 's-7' })))
 
 // The log appends are queued asynchronously; give them a beat, then drop the
 // scratch tree so repeated runs leave nothing behind.

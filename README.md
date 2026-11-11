@@ -1,259 +1,165 @@
 # DSH Memory Gate
 
-中文 | [English](README.en.md)
+中文 | [English](<README.en.md>) | [维护设计](<DESIGN.md>)
 
-适用于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的插件：**按模型、按会话决定这一笔请求要不要带记忆身份头**。
+## 用途与非目标
 
-它管的是「这一笔请求是否让 TDAI 记忆代理认领它」这件事，而不是记忆本身。记忆的读写、分层（L0/L1/L2/L3）、预算、注入器全在 8096 代理那一侧；本插件只在客户端这一侧，决定请求发出去时带不带 `x-team-id` / `x-agent-id` / `x-task-id` 这组身份头，以及是否带上让代理把整个 DSH 会话当成一个会话的 `x-deepseek-harness-session-id`。
+为 DeepSeek Harness（DSH）的 pi-ai 请求选择命名记忆身份，并按会话保存选择。插件在同步 `llm-pi-ai/request-headers` waterfall 中添加身份头；不使用 `llm/stream`，不读取请求正文，不实现记忆预算或 token 统计。
 
-- ✅ 读写的**不是**记忆内容：插件不读、不写、不缓存任何记忆条目，只改请求头。
-- ✅ 不是隧道、不是转发、不新增端口：8420 / 8125 **没有**被本插件使用，也没有出现在 `forwards.conf` 里。
-- ✅ 不碰平面 B（new-api 公益站）。
+- 身份包含 `team` / `agent` / `task` 和额外请求头；模型可选择默认身份、指定身份或摘链。
+- Web 端提供「记忆闸门」配置卡片和模型行「记忆身份」下拉框。
+- 插件不读写记忆内容、不代理流量、不新增端口或隧道，也不控制服务端注入、记忆分层或持久化。
 
-## 为什么需要
+**代理约定不等于插件保证。** 此设计面向通过身份头选择记忆、可能把无身份会话永久标记为 bypass 的代理。实际是否注入、写入记忆、如何解析会话头，必须按你的代理配置和实现验证；插件不能撤销代理状态。
 
-DSH 的 `magpie` provider 默认把 `baseURL` 指向 `http://127.0.0.1:8096/dsh/default`——那不是 Magpie，而是 **TDAI 记忆代理**。这个代理只有在请求带身份三件套时才做身份预选；一旦某一笔请求没带，它就把该会话记成 `bypassed=true`，而**这是终态**：此后每一轮都 `skipping all injection`，连 L0 都不写。
+**摘链只清理核心头。** 在受信 origin 上，`detach` 删除三个身份头（当时的头名与当前头名的并集）及 DSH 会话头，不删除任意额外头或其他认证头。其他头仍可能让代理识别身份；后续中间件也可重新添加头，因此不保证代理无记忆副作用。
 
-于是一个具体的问题出现了：
+## 安装、升级与回滚
 
-1. **判定层不该被记忆污染。** 路由/看门狗这类做判定的模型，被注入记忆后判定会变（记忆里的旧结论会改写当下判断）。原设计的解法是让它们走别的直连 provider，但那需要额外的 key；**在客户端按模型摘链**是零依赖的等价手段。
-2. **会话中途改主意 = 永久失去记忆。** 因为 `bypassed` 是终态，如果第一笔请求带了身份头、第二笔又摘掉，这个会话就再也回不到有记忆的状态。所以「第一笔决定」必须被**钉住**（pin），之后同 `sessionId` 一律复用，配置改动只影响新会话。
-3. **DSH 不发会话头，代理就每轮开一个新会话。** 代理认 `x-deepseek-harness-session-id`（`resolveConversationId`），但 DSH 自己不发。补上这一个头，代理才能把一个 DSH 会话当成一个会话。
-4. **记忆 + 超长上下文会叠加。** 代理的服务端预算（`tdai.memory.l1Limit` 等）在服务器 YAML 里，客户端无法按请求覆盖。本插件的「预算闸门」是**客户端**闸门：粗估请求体量，超阈值就在会话首笔请求时摘链。
+桌面 profile 的分步操作（退出校验、备份、装后指纹、行为验证、回滚）见[部署清单](<DEPLOY.md>)。
 
-## 特性
+需要 Node `^22.19.0 || >=24`。当前[清单](<package.json>)的精确 CI cohort 是 DSH `0.2.2-rc.1`、Cordis `4.1.0`、Schemastery `3.19.0`。peer 范围及源码中的旧版分支不是所有版本均已实测的承诺。
 
-- **命名记忆身份**：每个身份 = `team` / `agent` / `task` 三件套（可留空的部分会被省略）+ 任意多组额外头。身份 ID 不区分大小写唯一（`Worker` 与 `worker` 是同一个）。
-- **按模型选用**：模型页每行有一个「记忆身份」下拉框，选项是 `默认（随默认身份）`、`摘链（不带身份头）` 和全部身份 ID。选择写入该模型行在 `llm-pi-ai` 里的 `memoryGate` 字段。
-- **按会话钉住**：一个会话的第一次决策写入 `sessions.json`，之后同一 `sessionId` 一律复用。**改配置只影响新会话**，正在跑的会话保持它一开始的决定——这正是「摘链要谨慎」的技术原因。
-- **默认身份 + 头名覆盖**：没被单独指定的模型一律随默认身份；三个身份头的名字可以改（例如网关把 `x-team-id` 拼成 `X-Team`）。
-- **可选的会话头**：默认发送 `x-deepseek-harness-session-id`，可在卡片里关掉。
-- **可选预算闸门**：默认关闭。打开后，会话第一笔请求粗估超过阈值就摘链并钉住。
-- **只在记忆链上动手**：只有 `baseURL` 指向 8096（或主机名含 `tdai` / `memory`）的路由才会被处理；其它路由**一个头都不加、不改、不删**。
-- **落盘可查**：每次决策一行 JSONL，可在事后核对某个会话为什么有/没有记忆。
+### 构建与普通 profile 安装
 
-## 安装
-
-插件与 DSH 版本对应关系：
-
-| 插件版本 | 适配的 DSH 版本 | Cordis | Schemastery |
-| --- | --- | --- | --- |
-| 0.1.0 | 0.2.2-rc.1 | 4.1.0 | ≥ 3.18.2（实测 3.18.5 与 3.19.0 均可） |
-
-本包自带 `cordis.patch.yml`，组合器会自动挂载 host 半端，并向 Web 客户端提供 `/plugins/dsh-memory-gate/client.js`——安装后无需额外的组合配置。
-
-### 装进 `desktop` profile（本仓实际采用的方式）
-
-`desktop` profile 由桌面应用独占管理，`dsh plugin --profile desktop add …` 会被拒绝
-（`profile "desktop" is managed exclusively by the Electron application`）。因此改为把包放进 profile 自己的
-依赖表，并用**应用自带的 pnpm** 安装：
+在仓库根目录执行；把示例 profile 和版本替换成实际值：
 
 ```sh
-node scripts/install-profile.mjs            # 默认 desktop profile
-node scripts/install-profile.mjs --dry-run  # 只看计划，不写盘
+npm ci --legacy-peer-deps=false
+npm run build
+npm pack --ignore-scripts
+dsh plugin --profile my-profile add ./dsh-memory-gate-0.1.0.tgz
 ```
 
-脚本会备份 `package.json` / `pnpm-lock.yaml`，把依赖写成 `file:dsh-memory-gate-<version>.tgz`、把包名追加到
-`dsh.profile.bundles`，然后用应用自带的 pnpm 安装，最后**逐字节比对**装进去的 `lib/index.js` 与本地构建产物，
-并拒绝带嵌套 `node_modules` 的安装结果。装完重启桌面应用即可生效。
+包内[组合补丁](<cordis.patch.yml>)注册 `memory-gate` 行，包名为 `dsh-memory-gate`。由宿主加载 host/client；不要把源码目录用 `link:` 接入真实 profile，以免解析到开发依赖副本。升级沿用该 profile 的包管理方式，并确认使用的是新 tarball，而不是旧缓存。
 
-两条硬约束，脚本已经内建，手工操作时也必须遵守：
+### Desktop profile 注意事项
 
-- **必须用应用自带的 pnpm**（`%LOCALAPPDATA%\…\dsh-primary-runtime\dependencies\pnpm`，本机为 11.28.5）。
-  全局的 pnpm 9 不认 profile 里 `pnpm-workspace.yaml` 的 `nodeLinker: hoisted`，会把 `node_modules` 重装成
-  isolated 布局——profile 原本 85 个可见包会只剩 11 个，等同于损坏。
-- **不要用 `link:` 依赖**。`link:` 让插件按自己的 `node_modules` 解析依赖，于是它拿到的是开发目录里的
-  `@deepseek-ai/schemastery`（3.19.0），而同 profile 其它 bundle 都拿 profile 根的那份（3.18.5）。
-  `file:` tarball 交给 pnpm 托管，解析路径与其它插件完全一致。
-- **换了 tarball 内容后必须强制重装**。lockfile 里记着 `file:` 依赖的 `integrity`；替换 `.tgz` 而 specifier 不变时，
-  pnpm 会打印 `Already up to date` 并原样复用上次的解包目录。`install-profile.mjs` 因此每次都**重新 build + 重新 pack**、
-  删掉已安装目录，并把该包在 lockfile 里的两条记录（importer 与 packages）删掉，逼 pnpm 重新计算哈希再解包。
-
-### 其它安装源
+Desktop profile 由桌面应用管理，应优先使用应用提供的插件安装入口；不要假设全局 CLI 与桌面内核相同。仓库的[安装辅助脚本](<scripts/install-profile.mjs>)是 Windows 桌面环境下的现有安装替换工具：
 
 ```sh
-# GitHub（git 源，npm 会跑 prepare 自动构建，要求 Node ^22.19.0 或 >=24）
-dsh plugin --profile <profile> add github:<owner>/dsh-memory-gate
-
-# tarball
-npm ci --legacy-peer-deps=false && npm run build && npm pack
-dsh plugin --profile <profile> add ./dsh-memory-gate-<version>.tgz
+node scripts/install-profile.mjs --dry-run
+node scripts/install-profile.mjs "C:/path/to/profile" --dry-run
+# Run only after backing up the profile and closing DSH:
+node scripts/install-profile.mjs "C:/path/to/profile"
 ```
 
-上面两条适用于非 `desktop` 的 profile。装完重启，用 `bash` 工具跑 `dsh plugin --profile <profile> list`
-确认 `memory-gate` 行处于 active。注意全局 `dsh` CLI（本机 0.2.1-rc.2）与桌面应用的内核（0.2.2-rc.1）
-版本并不相同，`--dump-config` 也不对 `desktop` 开放，所以核对加载状态请以应用里的「插件」页为准。
+- 默认路径为用户主目录下的 `.dsh/profiles/desktop`；**脚本不以 `DSH_HOME` 推导此路径**，自定义目录请显式传入。
+- dry-run 仍要求 profile 和脚本所探测的应用内置 Node/pnpm 存在，不证明实际安装一定成功。
+- 实际运行会重建、打包，备份 profile 的包清单和锁文件，替换 tarball、删除旧插件目录及对应锁记录，再用应用内置 pnpm 安装，并逐字节检查所有构建输出、拒绝插件内嵌套依赖目录。
+- 修改 profile 前会严格解析锁文件，并预先计算 importer/package/snapshot 记录的删除结果。仅在不存在已安装目录和依赖声明时允许没有旧记录的首次安装；已有安装却缺少记录时拒绝继续。没有事务式自动回滚。
+- 不要随意用全局 pnpm 重装应用 profile；布局和依赖实例可能不同。脚本不会关闭、重启桌面应用或自动恢复现场。
+
+### 安全回滚
+
+操作前完全退出 DSH，并备份整个目标 profile（至少保留包清单、锁文件、原 tarball 和相关配置）；同版本 tarball 可能被覆盖，脚本自动备份的两份文件并不足以完整回滚。
+
+失败后保持应用关闭：恢复**同一时点**的清单、锁文件及旧 tarball，用该应用原本的 Node/pnpm 在目标 profile 重装；或恢复完整 profile 备份。确认依赖与配置一致后手动启动应用，再检查插件加载和新请求。不要只覆盖锁文件，也不要以删除会话 pin 代替回滚。保留插件存储备份；本地回滚不会恢复代理端记忆状态。
 
 ## 配置
 
-打开「插件」页 → **dsh-memory-gate** 详情页 → **记忆闸门** 卡片（DSH 0.1.5 上是「设置 → 插件 → 插件配置」里以 `memory-gate` 命名空间为键的卡片）。卡片有五个配置字段（都写在同一份 section 里）：
+在支持的 Web 宿主中，进入「插件 → dsh-memory-gate」查看「记忆闸门」卡片；旧版分支使用「设置 → 插件 → 插件配置」槽位。这里描述的是源码实现的 UI，**不是本次浏览器渲染验收结果**。
 
-| 字段 | 含义 | 默认值 |
+| 字段 | 默认值 | 用途 |
 | --- | --- | --- |
-| `identities` | 命名身份列表：`id`、`team`、`agent`、`task` + 额外头行 | 空 |
-| `defaultIdentity` | 没有单独指定身份的模型所继承的身份 ID | 空（等于一律摘链） |
-| `headerNames` | 三个身份头的名字：`team` / `agent` / `task` | `x-team-id` / `x-agent-id` / `x-task-id` |
-| `budget` | `enabled` + `maxRequestTokens`（客户端粗估闸门） | 关闭 / 120000 |
-| `sessionHeader` | 是否发送 `x-deepseek-harness-session-id` | 开启 |
+| `identities` | `[]` | 命名身份：`id/team/agent/task/headers` |
+| `defaultIdentity` | 空字符串 | 未单独指定的模型继承的身份；为空则不添加身份 |
+| `headerNames` | `x-team-id/x-agent-id/x-task-id` | 三个身份头名称 |
+| `trustedOrigins` | `["http://127.0.0.1:8096"]` | 精确受信代理 origin；空列表全部禁用 |
+| `sessionHeader` | `true` | attach 且有 session ID 时添加 `x-deepseek-harness-session-id` |
 
-保存时由 host 半端校验；非法数据（ID 为空、ID 重复、team 为空、头名/头值不能被 Fetch 表示）会被拒绝并原样反馈，不写盘。
+身份 ID 去空白后按大小写不敏感比较；保存校验要求 ID 非空且唯一、`team` 非空，并检查 team/agent/task 与额外头的 Fetch 可表示性。`off` / `default` 是模型选择保留值，拒绝作为身份 ID；host 还校验身份头名合法且互异、不得占用会话头名，以及非空默认身份必须存在。空 agent/task 不发对应头。额外头后写，可能覆盖身份头；会话头启用时最后组装。
 
-### 使用步骤
-
-1. **建身份**：卡片里点「添加身份」，填身份 ID（例如 `worker`）和 `x-team-id` 对应的团队 ID（**必填**：没有团队的请求代理认为是未识别身份，永远无法注入记忆），按需填 agent / task 和额外头。
-2. **设默认身份**：在「默认身份」里选一个身份；不选则所有未单独指定的模型都摘链。
-3. **按模型选用**：打开「设置 → 模型」，展开提供方卡片，在模型行的「模型选项」（0.1.5 上是「容量」）折叠区里找到「记忆身份」下拉框：
-   - `默认（随默认身份）`：继承默认身份；
-   - `摘链（不带身份头）`：该模型一律不带身份头；
-   - 某个身份 ID：直接指定。
-
-   未保存的提供方行下拉框是禁用的，请先保存提供方。
-
-### 生效时机
-
-- **按会话钉住**：一个会话的第一笔记忆链请求决定它此后是否有记忆。**之后的配置修改只影响新会话。**
-- 头名/额外头/会话头开关在「钉住的 attach」上仍按当前配置解析（身份 ID 复用，头名取当前设置）。
-- 非记忆链路由完全不被触碰，配置对它们没有副作用。
-
-## 落盘与验证
-
-数据在 `~/.dsh/storage/memory-gate/` 下（`~` 取 `$DSH_HOME`，否则 `$USERPROFILE`/`$HOME` + `/.dsh`）。只有两个文件，都是本插件自己的诊断/状态数据：
-
-| 文件 | 内容 | 策略 |
-| --- | --- | --- |
-| `sessions.json` | `sessionId → { identity \| null, reason, at, provider, model }` | 载入同步、首次写立即落盘、其后 1s 防抖、上限 2000 条（按 `at` 丢弃最旧） |
-| `decisions.jsonl` | 每笔记忆链请求一行 JSON（`ts/kind/reason/provider/model/session/identity/tokens/chain`） | 追加写；>2MB 轮转为 `.1` |
-
-### 验证配方
-
-1. **看决策**：发一笔走记忆链的请求，然后：
-
-   ```sh
-   tail -n 5 ~/.dsh/storage/memory-gate/decisions.jsonl
-   # Windows PowerShell:
-   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\decisions.jsonl" -Tail 5
-   ```
-
-   应看到一行 `{"kind":"attach","reason":"attached",...,"identity":"worker",...}`；非记忆链路由不会产生任何行。
-
-2. **看钉住**：
-
-   ```sh
-   cat ~/.dsh/storage/memory-gate/sessions.json
-   # Windows PowerShell:
-   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\sessions.json"
-   ```
-
-   应看到该 `sessionId` 对应一条 `{ "identity": "worker", "reason": "attached", ... }`（或摘链时的 `"identity": null`）。
-
-3. **验证钉住真的生效**：把某个模型在下拉框里改成「摘链」，然后
-   - **新会话**：`decisions.jsonl` 出现 `detach reason=model-detached`，`sessions.json` 出现该新会话的 `identity: null`；
-   - **旧会话**：同一 `sessionId` 的后续请求仍是 `attach identity="worker"`（钉住生效，配置改动不追溯）。
-
-4. **验证非记忆链不受影响**：把某个直连 provider（例如 `stepfun`）的请求也跑一遍，`decisions.jsonl` 不新增行（`kind: skip` 的决策不写入磁盘日志，因为它在日志里没有信息量）。
-
-## 配置存储格式
-
-`memory-gate` 名下的用户层（DSH 0.1.7+ 写在 Profile 的 cordis 补丁中本插件行的 `config` 下；DSH 0.1.5 写在用户设置文档的同名命名空间里）：
-
-```yaml
-memory-gate:
-  identities:
-    - id: worker
-      team: team-a
-      agent: agent-a
-      task: task-a
-      headers:
-        - name: X-Tenant
-          value: acme
-  defaultIdentity: worker
-  headerNames:
-    team: x-team-id
-    agent: x-agent-id
-    task: x-task-id
-  budget:
-    enabled: false
-    maxRequestTokens: 120000
-  sessionHeader: true
-```
-
-模型行上的选择（写在 `llm-pi-ai` 名下，由下拉框写入，无需手工维护）：
-
-```yaml
-llm-pi-ai:
-  providers:
-    magpie:
-      models:
-        - id: my-model
-          memoryGate: worker   # 或 "off"（摘链）/ "default"（随默认身份）
-```
-
-部署方也可以通过插件的 cordis 行 `config:` 预置组合层配置（作为用户层的 base）：
+以下是插件行的组合层示例，不是可直接覆盖整个 profile 的文件：
 
 ```yaml
 - id: memory-gate
   name: dsh-memory-gate
   config:
     identities:
-      - id: worker
-        team: team-a
-        agent: agent-a
-    defaultIdentity: worker
+      - id: example-worker
+        team: example-team
+        agent: example-agent
+        task: ""
+        headers:
+          - name: X-Tenant
+            value: example-tenant
+    defaultIdentity: example-worker
+    headerNames:
+      team: x-team-id
+      agent: x-agent-id
+      task: x-task-id
+    trustedOrigins:
+      - http://127.0.0.1:8096
+    sessionHeader: true
 ```
 
-> 组合层配置**不经过**写时校验（`apply()` 直接读 cordis 行）。一个名字不能被 Fetch 表示的额外头行会在盖章时被单独丢弃并 `console.warn`，其余头（含身份三件套与会话头）照常发送。
+在「设置 → 模型」展开已保存的 provider 和模型的「模型选项」（旧标签为「容量」），选择默认、摘链或身份。未保存的 provider 下拉框禁用。下拉框写入 `llm-pi-ai.providers.<provider>.models[]` 的 `memoryGate`：`off`、`default` 或身份 ID；默认选择可移除此字段。DOM 锚点依赖宿主页面结构，更新后可能找不到控件。
 
-## 支持范围与已知限制
+### 请求识别与会话生效范围
 
-- 只对 **pi-ai 适配器**（`llm-pi-ai` 提供方路由，含手工声明的自定义提供方）生效。`dsh-llm-deepseek` 这类直连路由不经过 `llm-pi-ai/request-headers` 这道缝——这本来就是正确的：那条路由没有记忆。
-- `llm-pi-ai/request-headers` 是 **同步** waterfall：监听器必须同步执行并调用 `next()`。本插件在这条路径上只做一次 Map 查找和若干次 `Headers.set`；任何异常都 fail-open（加不上头 ≠ 发不出请求）。
-- **`bypassed` 是终态，这是本插件最大的风险面**：一旦某个会话在首笔请求上摘了链，它此后无论配置怎么改都不会再获得记忆。删掉 `sessions.json` 里该会话的记录**不会**让代理撤销 bypass，只会让插件重新做一次决策（而代理那边已经记住了）。要恢复记忆，请开新会话。
-- 只有**主请求**会钉住会话决策：`purpose` 非空的辅助调用（标题生成、压缩等）仍会带上身份头，但**不会**创建钉住记录——辅助调用不该决定主会话的命运。
-- 预算闸门是**粗估**，不是 tokenizer：每 4 个非 CJK 字符算 1 token，每个 CJK 字符算 0.75 token，另加每条消息 8 token 的固定开销。它只回答「这个会话是不是已经很大了」。
-- 会话头让代理把 DSH 会话当成一个会话；但它**不**改变 DSH 自己的会话划分，也不改变代理的 L0/L1/L2/L3 分层与注入器配置——那些都在服务器 YAML 里。
-- 8420 / 8125 未被使用；插件不新增隧道、不转发流量、不落地任何记忆内容。
-- **判断本插件是否生效，只能看它自己的两个文件**：`decisions.jsonl` 有没有 `attach`、`sessions.json` 里该会话的 `identity` 是不是非空。代理侧的 `conversation/count`、`layer_counts`、面板数据都在数据面（8420/8125），而本机常见的接法是**只把 8096 转发出来**（`ssh -L …:8096:…`）。那种情况下 `curl 127.0.0.1:8096/v3/…` 会得到 `model must be a nonempty string`——那不是插件的问题，是 8096 是 chat 路由、`/v3` 数据面根本不在这条隧道上。别据此判断"记忆没接上"。
-- 下拉框通过 DOM 锚定注入到官方模型页每行的「模型选项」折叠区（0.1.5 叫「容量」；官方槽位没有模型行级扩展点）。页面结构若变化，插件会停止注入而不影响页面本身；折叠的模型行不渲染该容器，也就没有下拉框，展开即出现。
+升级/降级注意：若先降级到不认识快照的旧版本，它重写 `sessions.json` 时会丢掉 `snapshot` 与 `migratedAt`；再升级后这些 pin 会按**当时**配置重新迁移一次。文件 `version` 字段不参与校验，无法据此识别降级。
 
-## 开发
+升级注意：不再按 `tdai` / `memory` 关键词或任意 `:8096` 子串识别。远程代理、localhost 别名、HTTPS 或其他端口需要显式加入白名单；旧 pin 不会绕过白名单。旧 pin 升级后首次使用时会补快照，此后身份编辑不再影响该会话。
+
+- 使用 URL 解析后的 origin 精确匹配 `trustedOrigins`，默认仅 `http://127.0.0.1:8096`。不同协议、主机或端口必须单独加入；请求 URL 带凭据或非 HTTP(S) 时不匹配。白名单条目只能是无凭据、路径、查询或片段的 HTTP(S) origin。`[]` 禁用所有 origin。
+- 首个有 session ID、且 `purpose === undefined` 的记忆链请求可以创建 pin；无 session ID 不保存 pin，也不添加会话头。
+- 新 pin 保存**身份与头配置快照**：三个身份值、额外头、头名和会话头开关。之后编辑或删除该身份都不改变已钉住会话的请求头；新会话才使用新配置。模型选择和默认身份改变同样不会覆盖已有 pin。
+- 旧 pin 只有身份 ID。首次被主请求使用时按**当时**配置补快照并写入 `migratedAt`，此后不再变动。原始历史值从未持久化，无法还原；id 已不存在时保持摘链（`pinned-identity-missing`）。辅助请求不会触发迁移。
+- 白名单每次按**当前** `trustedOrigins` 复核，pin 不能让不受信 origin 获得身份头。
+- 辅助请求（`purpose` 已定义）不创建也不迁移 pin，但仍复用已有 pin；没有 pin 时按当前模型配置 attach/detach。**没有本地 pin 不意味着代理没有副作用**。
+- 未识别路由直接跳过，本插件不修改其头；其他适配器若不触发该事件，本插件就不参与。
+
+## 验证与排错
+
+存储根优先取 `DSH_HOME`，否则取 `USERPROFILE`、再取 `HOME` 并追加 `.dsh`；都没有则使用相对 `.dsh`。其下 `storage/memory-gate` 包含：
+
+| 数据 | 内容与限制 |
+| --- | --- |
+| `sessions.json` | session ID → `identity/reason/at/provider/model`，以及 `snapshot`（身份三值、额外头、头名、会话头开关）、清理用的 `removeHeaderNames`（头名合法时挂载与摘链都会记录，供改名后清除旧头名） 与迁移标记 `migratedAt`；启动同步读取，首次 dirty touch 同步尝试写入，后续 1 秒防抖；flush 时按 `max(at, migratedAt)` 保留最新 2,000 条，**不是 LRU** |
+| `sessions.json` 维护 | `node scripts/session-pins.mjs` 列出/清除 pin；摘链 pin（`identity: null`）不会自行恢复，必须清除后才会重新决策 |
+| `decisions.jsonl` | `ts/kind/reason/provider/model/session/identity/chain`；记忆链 attach/detach 的诊断记录，无 token 字段；追加前大小 ≥ 2 MiB 时尝试轮转到 `.1` |
+
+这些是状态/诊断数据，不是记忆内容，但会暴露身份 ID、会话 ID 和 URL；URL 可能带敏感参数。**pin 文件现在会原样保存身份头值与额外头的值**（快照需要原样重放），而 `decisions.jsonl` 不保存这些值和请求正文。两者都需要按敏感运行数据保护，并按大小上限估算体积：快照让每条 pin 显著变大，2,000 条满额且额外头较多时可达数 MiB。
+
+1. 用新会话发出一笔匹配路由的主请求，核对日志中的 provider/model/session/identity；预期 attach 或明确 detach 原因。
+2. 核对同 session 的 pin。将模型改成摘链：新会话应按新选择；旧 pin 应优先（前提是身份仍存在）。
+3. 使用受控代理或服务端请求追踪核对实际收到的头，再单独核对代理注入/写入行为。**attach 日志只证明本地决策，不证明每行成功盖章或服务端记忆成功**。
+
+只读查看示例（采用自定义 `DSH_HOME` 时先设置该环境变量）：
+
+```powershell
+$DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+Get-Content (Join-Path $DshHome 'storage/memory-gate/decisions.jsonl') -Tail 5
+Get-Content (Join-Path $DshHome 'storage/memory-gate/sessions.json')
+```
+
+| 现象 | 检查 |
+| --- | --- |
+| 没有日志 | 插件是否加载、是否 pi-ai 事件、provider/model 是否非空、URL 是否匹配、存储目录是否可写 |
+| `no-default-identity` / `identity-missing` | 默认值或模型指定 ID 是否存在 |
+| 改模型选择无效 | 是否复用旧 session pin；用新会话验证 |
+| attach 但代理未识别 | 查 `gate skipped` 告警、实际头名/值、其他头覆盖及代理协议 |
+| 下拉框缺失 | 先保存 provider、展开模型选项、刷新客户端；检查宿主 DOM/槽位兼容性 |
+
+读取失败/损坏会失去旧 pin 并重新决策；写入失败会告警但不保证重试，进程崩溃可能丢失防抖中的变更。裁剪、删除或换 `DSH_HOME` 也会失去本地 pin，不能撤销代理 bypass。需要改变会话策略时优先新建会话。
+
+存储不按 profile 隔离：共享同一 home 的进程共享路径但各有内存 Map，**无跨进程锁、无合并**，整表写入可能相互覆盖，日志轮转也可能争用。不要把共享目录当协调机制。若 `sessions.json` 不可读，会先复制为 `sessions.json.corrupt-<时间戳>` 再按无旧 pin 处理，不会静默抹掉原文件。
+
+## 开发命令
+
+在同一个操作系统/架构下安装并构建依赖，避免复用另一平台的 esbuild 二进制：
 
 ```sh
-npm ci --legacy-peer-deps=false  # 严格按锁文件安装并校验宿主 peer
-npm run typecheck   # 类型检查
-npm test            # vitest：纯逻辑 / 决策矩阵 / 落盘 / host seam
-npm run test:scripts # CI 矩阵、失败汇总与发布门禁测试
-npm run build       # 产出 lib/index.js（host）、lib/client.js（web）、类型声明
-npm run pack:check  # 打包并以精确 cohort 严格消费产物与公开类型
-node scripts/smoke.mjs        # 人工过一遍决策矩阵的九条分支（跑 build 之后）
-npm run install:profile       # 装进 desktop profile（见「安装」）
+npm ci --legacy-peer-deps=false
+npm run typecheck
+npm test
+npm run test:scripts
+npm run build
+npm run pack:check
+node scripts/smoke.mjs
 ```
 
-Windows 上有两处只在这里才会踩到：`scripts/*.mjs` 调用 `npm` / `tar` 时需要 `shell: true`（它们是 `.cmd`
-shim），而 `node -e …` 不能走 shell（`cmd.exe` 会重解析里面的引号和括号）；`tar -tf` 输出 CRLF，按行比对前要归一化。
-另外本仓的 `node_modules` 里 `esbuild` 的平台二进制必须是 win32-x64——用 WSL 装过依赖后要在 Windows 侧重装，
-否则 `npm run build` 会报 "You installed esbuild for another platform"。
+打包检查会创建临时消费项目并安装依赖；smoke 使用临时 `DSH_HOME` 和模拟 Context，不证明真实宿主/UI/代理端到端成功。测试范围与兼容性分层见[设计说明](<DESIGN.md>)。贡献请基于分支提交 PR，说明测试证据；不要提交真实身份或 profile 数据。
 
-`scripts/smoke.mjs` 会把 `$DSH_HOME` 指到临时目录再 `import` 产物，所以它不会碰你真实的
-`~/.dsh/storage/memory-gate/`。手工验证时请照此办理，否则合成的 session id 会被钉进真实
-`sessions.json`。
-
-测试全部位于 `tests/`：
-
-| 文件 | 覆盖 |
-|---|---|
-| `tests/identities.spec.ts` | section 默认值与强制转换、全部校验问题码（大小写不敏感重复 ID、空 team、非法头名/头值）、`identityHeaders` 组装、`estimateTokens`（CJK vs 拉丁）、`isMemoryChain`、`parsePick` |
-| `tests/gate.spec.ts` | 决策矩阵：非记忆链 skip、模型摘链、无默认身份、身份缺失、attach（含会话头）、钉住优先、钉住身份被删、预算超限、钉住摘链保持、无 sessionId 不钉、辅助调用不钉 |
-| `tests/store.spec.ts` | 临时目录里的 pin 往返、按上限裁剪、损坏文件降级为空、首次写同步落盘、后续写防抖、决策日志建目录、**批量追加按调用顺序落盘**、目录中途消失不报错、轮转 |
-| `tests/host.spec.ts` | 假 cordis Context 上的 apply()：监听器注册、`Headers` 实际取值、非记忆链不改头、坏行只丢一行、fail-open、决策日志与单次播报、dispose 时落盘、写时校验两种 cordis 调用形状、0.1.5 命名空间注册，以及**真实 schemastery 对 `Config` 的 `resolve`**（空/完整/部分三组输入） |
-
-最后那组 schema 测试不是凑数：`apply()` 是内核**在校验之后**才调用的，只测 `apply()` 永远碰不到 schema 层，
-一个"能构建但 resolve 不了"的 `Config` 会带着全绿的测试装进 profile 然后在内核里炸。
-
-它还有一层用处：我一度误判 schema 构建错了，正是这组测试按正确签名调用 `resolve`、证明 schema 一直是好的，
-才把结论拉回正轨——真正的错误在我自己写的探测里（`Schema.resolve` 参数顺序传反）。完整复盘见 `DESIGN.md` §7.1。
-
-CI 仅在 PR 和 `v*` 标签推送时运行。PR 从 `package.json` 的 `dshCompatibility` 读取精确 DSH/Cordis/Schemastery 矩阵，在 Node 22、24 上运行静态、单元与打包检查；标签独立执行发布门禁、显式构建和 npm OIDC 发布，不重复运行测试。CI 不上传 artifacts 或创建 GitHub Release。
-
-## 许可
-
-[MIT](LICENSE)
+许可：[MIT](<LICENSE>)。

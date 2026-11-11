@@ -1,266 +1,161 @@
 # DSH Memory Gate
 
-[中文](README.md) | English
+[中文](<README.md>) | English | [Maintainer design](<DESIGN.md>)
 
-A plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) that decides, **per model and per session**, whether a request carries the memory identity headers.
+## Purpose and non-goals
 
-It governs one question: does this request let the TDAI memory proxy claim it? It does not manage memory. Reading and writing memory, the L0/L1/L2/L3 tiers, budgets and injectors all live on the 8096 proxy side. This plugin works only on the client side: it decides whether the outgoing request bears `x-team-id` / `x-agent-id` / `x-task-id`, and whether it carries `x-deepseek-harness-session-id`, which makes the proxy treat one DSH session as one conversation.
+Select named memory identities for DeepSeek Harness (DSH) pi-ai requests and retain the selection per session. The plugin adds headers at the synchronous `llm-pi-ai/request-headers` waterfall. It does not use `llm/stream`, inspect request bodies, implement memory budgets, or count tokens.
 
-- It does **not** read or write memory content: no memory entries are read, written or cached. Only request headers change.
-- It is not a tunnel or a forwarder and opens no port: **8420 / 8125 are not used** and do not appear in `forwards.conf`.
-- It does not touch plane B (the new-api public-goods gateway).
+- An identity contains `team` / `agent` / `task` and extra headers. Models can inherit the default, select an identity, or detach.
+- The Web client provides a **Memory gate** configuration card and a per-model **Memory identity** picker.
+- The plugin does not read/write memory content, proxy traffic, open ports/tunnels, or control server-side injection, tiers, or persistence.
 
-## Why
+**Proxy assumptions are not plugin guarantees.** This design targets proxies that select memory through identity headers and may permanently mark unidentified sessions as bypassed. Verify injection, memory writes, and conversation-header resolution against your own proxy implementation/configuration. The plugin cannot undo proxy state.
 
-DSH's `magpie` provider normally points its `baseURL` at `http://127.0.0.1:8096/dsh/default` — not Magpie, but the **TDAI memory proxy**. That proxy only performs identity pre-selection when a request carries the identity triple. The moment a request arrives without it, the proxy records the session as `bypassed=true`, and **that is terminal**: every later turn logs `skipping all injection`, and not even L0 is written.
+**Detach clears core headers only.** On trusted origins it removes the three identity headers (the union of the names pinned at detach time and the current names) plus the DSH session header, not arbitrary extras or authentication headers. Other headers and later middleware can still identify the request; this is not a guarantee of no proxy side effects.
 
-So a concrete problem appears:
+## Installation, upgrades, and rollback
 
-1. **Judgement models must not be polluted by memory.** Router/watchdog-style models change their judgement when injected memory rewrites the present decision. The original design routed them to other direct providers, but that needs extra keys; **detaching memory per model on the client** is the zero-dependency equivalent.
-2. **Changing your mind mid-session costs memory permanently.** Because `bypassed` is terminal, a session that carried identity headers on its first request and dropped them on its second can never return to having memory. The first decision must therefore be **pinned**, and every later request of that `sessionId` reuses it; configuration changes only affect new sessions.
-3. **DSH sends no session header, so the proxy starts a new session every turn.** The proxy reads `x-deepseek-harness-session-id` (`resolveConversationId`) but DSH never sends it. Adding that one header lets the proxy key one DSH session as one conversation.
-4. **Memory plus a long context stack up.** The server-side budgets (`tdai.memory.l1Limit` and friends) live in the server's YAML and cannot be overridden per request from the client. This plugin's budget gate is a **client-side** guard: it coarsely estimates the request and detaches on the session's first request when the estimate is already too large.
+Step-by-step desktop-profile runbook (exit check, backup, post-install fingerprint, behaviour check, rollback): see the [deployment checklist](<DEPLOY.md>) (Chinese).
 
-## Features
+Requires Node `^22.19.0 || >=24`. The exact CI cohort declared in the [manifest](<package.json>) is DSH `0.2.2-rc.1`, Cordis `4.1.0`, and Schemastery `3.19.0`. Peer ranges and legacy source branches are not evidence that every matching version has been tested.
 
-- **Named memory identities**: each identity is a `team` / `agent` / `task` triple (empty parts are omitted) plus any number of extra header rows. Identity ids are unique case-insensitively (`Worker` and `worker` name the same identity).
-- **Per-model selection**: every model row on the Models page carries a **Memory identity** dropdown offering `Default (follow the default identity)`, `Detach (no identity header)`, and every identity id. The pick is written to that model's `memoryGate` field in `llm-pi-ai`.
-- **Per-session pinning**: the first decision of a session is written to `sessions.json` and reused for every later request with the same `sessionId`. **Configuration changes only affect new sessions**; a live session keeps what it started with — the technical reason detaching deserves care.
-- **Default identity and header-name overrides**: models not named individually inherit the default identity; the three header names are configurable (a gateway may spell `x-team-id` as `X-Team`).
-- **Optional session header**: `x-deepseek-harness-session-id` is sent by default and can be switched off on the card.
-- **Optional budget gate**: off by default. When on, a session whose first request is estimated above the ceiling is detached and that decision is pinned.
-- **Only the memory chain is touched**: only routes whose `baseURL` points at 8096 (or a host naming `tdai` / `memory`) are handled. Every other route stays byte-identical — no header added, changed or removed.
-- **Auditable on disk**: one JSONL line per decision, so you can check afterwards why a session had memory or not.
+### Build and install into a regular profile
 
-## Installation
-
-Plugin-to-DSH compatibility:
-
-| Plugin version | DSH version | Cordis | Schemastery |
-| --- | --- | --- | --- |
-| 0.1.0 | 0.2.2-rc.1 | 4.1.0 | ≥ 3.18.2 (verified on 3.18.5 and 3.19.0) |
-
-The package ships its own `cordis.patch.yml`: the profile composer mounts the host half automatically and serves `lib/client.js` to the Web client as `/plugins/dsh-memory-gate/client.js` — no extra composition edits are needed after installing.
-
-### Into the `desktop` profile (what this repo actually does)
-
-The `desktop` profile belongs to the Electron app, and `dsh plugin --profile desktop add …` is refused
-(`profile "desktop" is managed exclusively by the Electron application`). The package is registered in the
-profile's own dependency table instead, and installed with **the app's bundled pnpm**:
+Run from the repository root; replace the example profile/version as needed:
 
 ```sh
-node scripts/install-profile.mjs            # defaults to the desktop profile
-node scripts/install-profile.mjs --dry-run  # show the plan, write nothing
+npm ci --legacy-peer-deps=false
+npm run build
+npm pack --ignore-scripts
+dsh plugin --profile my-profile add ./dsh-memory-gate-0.1.0.tgz
 ```
 
-The script backs up `package.json` / `pnpm-lock.yaml`, records the dependency as
-`file:dsh-memory-gate-<version>.tgz`, appends the package name to `dsh.profile.bundles`, installs with the app's
-own pnpm, and then **byte-compares** the installed `lib/index.js` against the local build, refusing any result
-that carries a nested `node_modules`. Restart the desktop app afterwards.
+The bundled [composition patch](<cordis.patch.yml>) registers the `memory-gate` row under package name `dsh-memory-gate`. The host loads both halves. Avoid `link:` dependencies in a real profile: they may resolve development dependency copies. Upgrade through the profile's existing package-management mechanism and confirm it consumes the fresh tarball rather than a cached extraction.
 
-Three hard rules, enforced by the script and required when installing by hand:
+### Desktop profile caveats
 
-- **Use the app's bundled pnpm** (`%LOCALAPPDATA%\…\dsh-primary-runtime\dependencies\pnpm`, 11.28.5 here).
-  A global pnpm 9 ignores `nodeLinker: hoisted` from the profile's `pnpm-workspace.yaml` and relinks
-  `node_modules` into an isolated layout — the profile drops from 85 visible packages to 11, which is damage.
-- **Never use a `link:` dependency.** `link:` makes the plugin resolve dependencies from its own
-  `node_modules`, handing it the dev tree's `@deepseek-ai/schemastery` (3.19.0) while every other bundle in the
-  same profile gets the profile root's copy (3.18.5). A `file:` tarball is hoisted by pnpm and resolves exactly
-  like the rest.
-- **Force a reinstall after replacing the tarball.** A lockfile records the `integrity` of a `file:` dependency, so
-  swapping the `.tgz` without changing the specifier makes pnpm print `Already up to date` and reuse the previous
-  extraction verbatim. `install-profile.mjs` therefore rebuilds and repacks every time, removes the installed
-  directory, and deletes both lockfile records for the package (importer and packages section) so pnpm re-hashes
-  and re-extracts instead of trusting the stale entry.
-
-### Other sources
+Desktop profiles are application-managed; prefer the application's plugin installation UI. Do not assume a global CLI uses the desktop kernel. The repository's [installation helper](<scripts/install-profile.mjs>) replaces an existing installation in a Windows desktop environment:
 
 ```sh
-# GitHub (git source; npm runs `prepare` and builds, Node ^22.19.0 or >=24)
-dsh plugin --profile <profile> add github:<owner>/dsh-memory-gate
-
-# tarball
-npm ci --legacy-peer-deps=false && npm run build && npm pack
-dsh plugin --profile <profile> add ./dsh-memory-gate-<version>.tgz
+node scripts/install-profile.mjs --dry-run
+node scripts/install-profile.mjs "C:/path/to/profile" --dry-run
+# Run only after backing up the profile and closing DSH:
+node scripts/install-profile.mjs "C:/path/to/profile"
 ```
 
-Both apply to profiles other than `desktop`. After installing, restart and check the app's **Plugins** page for an
-active `memory-gate` row. Note that the global `dsh` CLI (0.2.1-rc.2 here) is not the kernel the desktop app runs
-(0.2.2-rc.1), and `--dump-config` is not available for `desktop`, so the Plugins page is the source of truth.
+- The default is `.dsh/profiles/desktop` under the user home. **The helper does not derive this path from `DSH_HOME`**; pass a custom path explicitly.
+- Dry-run still requires a profile and the bundled Node/pnpm in a location the script probes. It does not prove installation will succeed.
+- A real run rebuilds/packs, backs up the profile manifest/lockfile, replaces the tarball, removes the old plugin directory and lock entries, installs with the bundled pnpm, byte-compares all built outputs, and rejects nested plugin dependencies.
+- Before profile mutation, the helper strictly parses the lockfile and computes removal of importer/package/snapshot records. Missing old records are allowed only when neither an installed directory nor a declared dependency exists; inconsistent existing installations are rejected. There is no transactional automatic rollback.
+- Do not substitute a global pnpm casually: dependency layout/instances may differ. The helper does not close or restart the desktop app or recover a failed installation automatically.
+
+### Safe rollback
+
+Fully exit DSH first. Before changing anything, back up the complete target profile, or at least its manifest, lockfile, old tarball, and relevant configuration. A same-version tarball can be overwritten; the helper's two automatic file backups alone are insufficient for full rollback.
+
+After failure, keep DSH closed. Restore the manifest, lockfile, and old tarball from the **same snapshot**, then reinstall in that profile with the application's original Node/pnpm; alternatively restore the complete profile backup. Start the app manually only after dependencies/configuration are consistent, then check loading and new requests. Do not restore only the lockfile or delete pins as a substitute for rollback. Preserve a plugin-storage backup; local rollback does not restore proxy memory state.
 
 ## Configuration
 
-Open the **Plugins** page → the **dsh-memory-gate** detail page → the **Memory gate** card (on DSH 0.1.5 the card lives under **Settings → Plugins → Plugin configuration**, keyed by the `memory-gate` namespace). The card edits one section with five fields:
+On a supported Web host, open **Plugins → dsh-memory-gate → Memory gate**. The legacy branch uses **Settings → Plugins → Plugin configuration**. This describes the UI implemented in source, **not browser-rendered acceptance verified in this documentation task**.
 
-| Field | Meaning | Default |
+| Field | Default | Purpose |
 | --- | --- | --- |
-| `identities` | Named identities: `id`, `team`, `agent`, `task` plus extra header rows | empty |
-| `defaultIdentity` | The identity every model inherits unless it names another one | empty (everything detaches) |
-| `headerNames` | The three header names: `team` / `agent` / `task` | `x-team-id` / `x-agent-id` / `x-task-id` |
-| `budget` | `enabled` plus `maxRequestTokens` (client-side coarse gate) | off / 120000 |
-| `sessionHeader` | Whether to send `x-deepseek-harness-session-id` | on |
+| `identities` | `[]` | Named `id/team/agent/task/headers` records |
+| `defaultIdentity` | empty string | Identity inherited by unspecified models; empty adds no identity |
+| `headerNames` | `x-team-id/x-agent-id/x-task-id` | Names of the three identity headers |
+| `trustedOrigins` | `["http://127.0.0.1:8096"]` | Exact trusted proxy origins; empty disables all |
+| `sessionHeader` | `true` | Add `x-deepseek-harness-session-id` on attach when a session ID exists |
 
-The host half validates on save; invalid data (empty id, duplicate id, empty team, header name or value Fetch cannot represent) is refused and echoed back, and nothing is written.
+Identity IDs are trimmed and compared case-insensitively. Save validation requires nonempty unique IDs, a nonempty team, and Fetch-representable team/agent/task and extra headers. Reserved model picks `off` / `default` are rejected as identity IDs. The host also requires valid distinct identity header names that do not occupy the session header, and a nonempty default identity must exist. Empty agent/task fields produce no corresponding header. Extra rows are assembled later and can override identity headers; the enabled session header is assembled last.
 
-### Usage
-
-1. **Create an identity**: click **Add identity**, give it an id (e.g. `worker`) and the team id for `x-team-id` (**required**: a teamless request is treated as unidentified and can never receive memory injection), plus agent / task and any extra headers you need.
-2. **Set the default identity**: pick one under **Default identity**; with none selected, every model without its own pick runs detached.
-3. **Pick per model**: open **Settings → Models**, expand a provider card, and find the **Memory identity** dropdown inside the model row's **Model options** disclosure (**Capacities** on 0.1.5):
-   - `Default (follow the default identity)` inherits the default identity;
-   - `Detach (no identity header)` sends no identity header for that model;
-   - an identity id names it directly.
-
-   The dropdown is disabled on unsaved provider rows; save the provider first.
-
-### Effective timing
-
-- **Pinned per session**: a session's first memory-chain request decides whether it has memory from then on. **Later configuration changes only affect new sessions.**
-- On a pinned attach, header names, extra rows and the session-header switch still resolve from the current configuration (the identity id is reused; the names are current).
-- Non-memory-chain routes are never touched, so configuration has no side effect on them.
-
-## Storage and verification
-
-Data lives under `~/.dsh/storage/memory-gate/` (`~` comes from `$DSH_HOME`, else `$USERPROFILE`/`$HOME` plus `/.dsh`). There are exactly two files, both diagnostics/state owned by this plugin:
-
-| File | Content | Policy |
-| --- | --- | --- |
-| `sessions.json` | `sessionId → { identity \| null, reason, at, provider, model }` | loaded synchronously; the first write of a run lands immediately; later writes debounce 1 s; bounded at 2000 entries (oldest `at` dropped) |
-| `decisions.jsonl` | one JSON line per memory-chain request (`ts/kind/reason/provider/model/session/identity/tokens/chain`) | append-only; rotated to `.1` past 2 MB |
-
-### Verification recipe
-
-1. **Inspect decisions**: send one request over the memory chain, then:
-
-   ```sh
-   tail -n 5 ~/.dsh/storage/memory-gate/decisions.jsonl
-   # Windows PowerShell:
-   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\decisions.jsonl" -Tail 5
-   ```
-
-   You should see a line like `{"kind":"attach","reason":"attached",...,"identity":"worker",...}`. Non-memory-chain routes produce no line at all.
-
-2. **Inspect pins**:
-
-   ```sh
-   cat ~/.dsh/storage/memory-gate/sessions.json
-   # Windows PowerShell:
-   Get-Content "$env:USERPROFILE\.dsh\storage\memory-gate\sessions.json"
-   ```
-
-   The `sessionId` should map to `{ "identity": "worker", "reason": "attached", ... }` (or `"identity": null` when detached).
-
-3. **Prove pinning works**: flip one model to **Detach** in the dropdown, then
-   - for a **new session**, `decisions.jsonl` shows `detach reason=model-detached` and `sessions.json` gains that session with `identity: null`;
-   - for the **old session**, later requests with the same `sessionId` still show `attach identity="worker"` (the pin wins; configuration is not retroactive).
-
-4. **Prove other routes are untouched**: run a request to a direct provider (e.g. `stepfun`); `decisions.jsonl` gains no line (a `skip` decision is not persisted — it carries no information).
-
-## Storage format
-
-The user layer under the `memory-gate` name (in the profile's cordis patch under this plugin row's `config` on DSH 0.1.7+; in the user settings document's same-named namespace on DSH 0.1.5):
-
-```yaml
-memory-gate:
-  identities:
-    - id: worker
-      team: team-a
-      agent: agent-a
-      task: task-a
-      headers:
-        - name: X-Tenant
-          value: acme
-  defaultIdentity: worker
-  headerNames:
-    team: x-team-id
-    agent: x-agent-id
-    task: x-task-id
-  budget:
-    enabled: false
-    maxRequestTokens: 120000
-  sessionHeader: true
-```
-
-The per-model pick (under `llm-pi-ai`; written by the dropdown, no hand-editing needed):
-
-```yaml
-llm-pi-ai:
-  providers:
-    magpie:
-      models:
-        - id: my-model
-          memoryGate: worker   # or "off" (detach) / "default" (follow the default identity)
-```
-
-A deployment may also seed composition-base values through the plugin's cordis row `config:` block:
+This is a composition-layer plugin-row example, not a replacement for an entire profile file:
 
 ```yaml
 - id: memory-gate
   name: dsh-memory-gate
   config:
     identities:
-      - id: worker
-        team: team-a
-        agent: agent-a
-    defaultIdentity: worker
+      - id: example-worker
+        team: example-team
+        agent: example-agent
+        task: ""
+        headers:
+          - name: X-Tenant
+            value: example-tenant
+    defaultIdentity: example-worker
+    headerNames:
+      team: x-team-id
+      agent: x-agent-id
+      task: x-task-id
+    trustedOrigins:
+      - http://127.0.0.1:8096
+    sessionHeader: true
 ```
 
-> Composition-base values do **not** pass the write-time validator (`apply()` reads the cordis row directly). An extra header row whose name Fetch cannot represent is dropped alone at stamp time with a `console.warn`; every other header — the identity triple and the session header included — is still sent.
+Under **Settings → Models**, expand a saved provider and its model's **Model options** (legacy label: **Capacities**), then select Default, Detach, or an identity. Unsaved provider pickers are disabled. The picker writes `memoryGate` on `llm-pi-ai.providers.<provider>.models[]`: `off`, `default`, or an identity ID; Default may remove the field. DOM anchors depend on the host page structure and may stop locating controls after host updates.
 
-## Scope and known limitations
+### Recognition and session semantics
 
-- Only the **pi-ai adapter** (`llm-pi-ai` provider routes, including hand-declared custom providers) is affected. Direct routes such as `dsh-llm-deepseek` never pass through `llm-pi-ai/request-headers` — which is correct: that route has no memory.
-- `llm-pi-ai/request-headers` is a **synchronous** waterfall: listeners must run synchronously and call `next()`. This plugin does one map lookup and a handful of `Headers.set` calls on that path, and fails open on any error (failing to add headers must never mean failing to send the request).
-- **`bypassed` is terminal — the plugin's largest risk surface.** Once a session detaches on its first request, it will never gain memory again, no matter how the configuration changes. Deleting that session's row from `sessions.json` does **not** make the proxy revoke the bypass; it only makes the plugin decide again (the proxy has already made up its mind). To restore memory, start a new session.
-- Only **main requests** pin a session decision: auxiliary calls with a `purpose` (title generation, compaction, …) still carry identity headers but **never** create a pin — an auxiliary call should not decide the main session's fate.
-- The budget gate is a **coarse estimate**, not a tokenizer: one token per four non-CJK characters, 0.75 per CJK character, plus 8 tokens of fixed overhead per message. It only answers "is this conversation already large".
-- The session header makes the proxy treat a DSH session as one conversation, but it changes neither DSH's own session boundaries nor the proxy's L0/L1/L2/L3 tiers and injector configuration — those stay in the server's YAML.
-- 8420 / 8125 are unused; the plugin adds no tunnel, forwards no traffic, and stores no memory content.
-- **Whether this plugin works can only be judged from its two own files**: does `decisions.jsonl` show `attach`, and is the session's `identity` non-empty in `sessions.json`. The proxy-side views — `conversation/count`, `layer_counts`, panel data — live on the data plane (8420/8125), and a common local setup forwards **only 8096** (`ssh -L …:8096:…`). In that case `curl 127.0.0.1:8096/v3/…` answers `model must be a nonempty string`: 8096 is a chat route and `/v3` is simply not on that tunnel. Do not read that as "memory is not connected".
-- The dropdown is injected into the official Models page's per-row **Model options** disclosure (called **Capacities** on 0.1.5) through DOM anchors, because the official slot contract offers no per-model-row extension point. If the page structure changes, the plugin simply stops injecting and leaves the page untouched; a collapsed model row renders no such container, so the dropdown appears when the row expands.
+- Parse the URL and exactly match its origin against `trustedOrigins`, defaulting only to `http://127.0.0.1:8096`. Different protocols, hosts or ports require separate entries. Credential-bearing or non-HTTP(S) request URLs do not match. Entries must be HTTP(S) origins without credentials, paths, query strings or fragments; `[]` disables all origins.
+- The first memory-chain request with a session ID and `purpose === undefined` can create a pin. Without a session ID, no pin or session header is created.
+- Downgrade caveat: an older build that does not know snapshots rewrites `sessions.json` without `snapshot`/`migratedAt`; after upgrading again those pins re-migrate once against **current** configuration. The file's `version` field is not validated, so this cannot be detected.
+- A new pin stores **a snapshot of the identity and header shaping**: its three values, extra rows, header names and the session-header switch. Editing or deleting that identity afterwards does not change the pinned session's headers; new sessions take the new configuration. Model/default changes never override an existing pin.
+- A legacy pin holds only an identity ID. The first main request that uses it snapshots the configuration **at that moment** and records `migratedAt`; it is fixed after that. The original values were never persisted and cannot be recovered. If the ID no longer exists the session stays detached (`pinned-identity-missing`). Auxiliary calls never migrate.
+- `trustedOrigins` is re-checked against **current** configuration on every request: a pin cannot give an untrusted origin identity headers.
+- Auxiliary requests (defined `purpose`) create no pin but reuse existing pins. Without a pin they attach/detach according to current model configuration. **No local pin does not imply no proxy side effects.**
+- Unrecognized routes are skipped without changing their headers. Adapters that do not emit this event are outside this plugin's scope.
 
-## Development
+## Verification and troubleshooting
+
+Storage uses `DSH_HOME` first; otherwise `USERPROFILE`, then `HOME`, with `.dsh` appended. With neither home variable it uses relative `.dsh`. Under that root, `storage/memory-gate` holds:
+
+| Data | Content and limits |
+| --- | --- |
+| `sessions.json` | Session ID → `identity/reason/at/provider/model`, plus `snapshot` (identity triple, extra rows, header names, session-header switch), the cleanup `removeHeaderNames` (recorded on attach and detach pins when the names are usable, so a rename can still clear the old names), and the migration marker `migratedAt`; synchronous startup read and first dirty-touch write attempt, then 1-second debounce; flush retains the newest 2,000 by `max(at, migratedAt)`, **not LRU** |
+| `decisions.jsonl` | `ts/kind/reason/provider/model/session/identity/chain`; diagnostic attach/detach records, no token fields; attempts rotation to `.1` when size is ≥ 2 MiB before append |
+
+These are state/diagnostics, not memory content, but expose identity IDs, session IDs, and URLs; URLs may contain sensitive parameters. **The pin file now stores identity and extra header values verbatim** (a snapshot has to replay them), while `decisions.jsonl` stores neither those values nor request bodies. Treat both as sensitive runtime data, and size for it: snapshots make each pin much larger, so a full 2,000 pins with many extra rows can reach several MiB.
+
+1. Send a main request in a new session on a matching route. Check provider/model/session/identity and the attach or explicit detach reason.
+2. Check the matching pin. Change that model to Detach: a new session should use the new pick; the old pin should win if its identity still exists.
+3. Inspect received headers through a controlled proxy or server trace, then separately verify proxy injection/writes. **An attach log proves a local decision, not successful stamping of every row or successful server memory.**
+
+Read-only inspection example (set `DSH_HOME` first when using a custom root):
+
+```powershell
+$DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+Get-Content (Join-Path $DshHome 'storage/memory-gate/decisions.jsonl') -Tail 5
+Get-Content (Join-Path $DshHome 'storage/memory-gate/sessions.json')
+```
+
+| Symptom | Check |
+| --- | --- |
+| No log | Plugin loading, pi-ai event, nonempty provider/model, URL match, writable storage |
+| `no-default-identity` / `identity-missing` | Whether the configured default/model identity exists |
+| Model change appears ineffective | Existing session pin; verify with a new session |
+| Attach but proxy does not recognize it | `gate skipped` warnings, actual names/values, other header overrides, proxy protocol |
+| Missing picker | Save provider, expand model options, refresh client, check DOM/slot compatibility |
+
+Unreadable/corrupt storage loses old pins and permits fresh decisions. Write failures warn without guaranteed retry; crashes can lose debounced changes. Eviction, deletion, or changing `DSH_HOME` also loses local pins and cannot revoke proxy bypass. Prefer a new session when changing session policy.
+
+Storage is not profile-scoped. Processes sharing a home share paths but keep separate in-memory maps, with **no cross-process lock and no merge**: a whole-map write can overwrite another process's pins and log rotation can race. Do not treat the shared directory as coordination. An unreadable `sessions.json` is first copied to `sessions.json.corrupt-<timestamp>` instead of being silently replaced.
+
+## Developer commands
+
+Install and build on the same OS/architecture rather than reusing another platform's esbuild binary:
 
 ```sh
-npm ci --legacy-peer-deps=false  # install strictly from the lockfile and enforce host peers
-npm run typecheck   # typecheck
-npm test            # vitest: pure logic / decision matrix / storage / host seams
-npm run test:scripts # CI matrix, failure summaries and release-gate tests
-npm run build       # emit lib/index.js (host), lib/client.js (web), type declarations
-npm run pack:check  # pack and strictly consume the artifact and public types with the exact cohort
-node scripts/smoke.mjs        # walk the decision matrix's nine branches by hand (after a build)
-npm run install:profile       # install into the desktop profile (see "Install")
+npm ci --legacy-peer-deps=false
+npm run typecheck
+npm test
+npm run test:scripts
+npm run build
+npm run pack:check
+node scripts/smoke.mjs
 ```
 
-Two things only bite on Windows: `scripts/*.mjs` need `shell: true` for `npm` / `tar` (they are `.cmd` shims)
-but must *not* use a shell for `node -e …` (`cmd.exe` re-parses the quotes and parentheses in those snippets);
-and `tar -tf` emits CRLF, so normalise before comparing lines. Also, `esbuild` in this repo's `node_modules`
-must be the win32-x64 binary — after installing dependencies inside WSL, reinstall on Windows or
-`npm run build` fails with "You installed esbuild for another platform".
+The package check creates a consumer project and installs dependencies. Smoke uses temporary `DSH_HOME` and a simulated Context; it does not prove real-host/UI/proxy end-to-end behavior. See the [design](<DESIGN.md>) for coverage and compatibility layers. Contribute through a branch and PR with test evidence; do not commit real identities/profile data.
 
-`scripts/smoke.mjs` points `$DSH_HOME` at a temp directory before importing the bundle, so it never touches your
-real `~/.dsh/storage/memory-gate/`. Do the same in any manual check: otherwise synthetic session ids get pinned
-into the real `sessions.json`.
-
-All tests live in `tests/`:
-
-| File | Coverage |
-|---|---|
-| `tests/identities.spec.ts` | Section defaults and coercion, every validation code (case-insensitive duplicate ids, empty team, invalid header name/value), `identityHeaders` assembly, `estimateTokens` (CJK vs latin), `isMemoryChain`, `parsePick` |
-| `tests/gate.spec.ts` | Decision matrix: non-chain skip, model detach, no default identity, missing identity, attach (with session header), pin precedence, deleted pinned identity, budget exceeded, pinned detach stays detached, no session id means no pin, auxiliary calls never pin |
-| `tests/store.spec.ts` | Pin round trip in a temp directory, pruning to the bound, corrupt file degrades to an empty store, first write lands immediately, later writes debounce, decision log creates/append/rotate, **batched appends land in call order**, a directory that vanishes mid-flight is dropped quietly |
-| `tests/host.spec.ts` | `apply()` over a fake cordis context: listener registration, real `Headers` values, non-chain routes untouched, one bad row dropped alone, fail-open, decision log and single announcement, flush on dispose, write-time validation in both cordis call shapes, 0.1.5 namespace registration, and **`Config` resolved by the real schemastery** (empty / full / partial inputs) |
-
-That last group is not filler: `apply()` is only called *after* the loader validates the row, so tests that call
-`apply()` directly never touch the schema layer. A `Config` that builds but cannot resolve would ship with an
-all-green suite and then break inside the kernel.
-
-It also earned its keep as a tiebreaker: when I briefly believed the schema itself was broken, this group — calling
-`resolve` with the correct signature — showed the schema had been fine all along. The actual bug was in my own
-probe (`Schema.resolve` takes the value first). Full post-mortem in `DESIGN.md` §7.1.
-
-CI runs only for PRs and `v*` tag pushes. PRs read the exact DSH/Cordis/Schemastery matrix from `package.json` → `dshCompatibility` and run static, unit and package checks on Node 22 then 24; tags independently run release gates, an explicit build, and npm OIDC publishing without repeating tests. CI does not upload artifacts or create GitHub Releases.
-
-## License
-
-[MIT](LICENSE)
+License: [MIT](<LICENSE>).

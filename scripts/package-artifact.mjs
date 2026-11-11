@@ -56,9 +56,9 @@ run('npm', [
 ], consumer)
 // Node is a real executable on every platform, so inline `-e` stays unquoted
 // by any shell; only the `.cmd` shims above need `shell: true`.
-run('node', ['-e', "import('dsh-memory-gate').then((m) => { if (m.name !== 'dsh-memory-gate') throw new Error('host entry name mismatch') })"], consumer)
-writeFileSync(join(consumer, 'check.mts'), `import { apply as applyHost } from 'dsh-memory-gate'
-import type { RemoteApi } from 'dsh-memory-gate/client'
+run('node', ['-e', `import('${pkg.name}').then((m) => { if (m.name !== '${pkg.name}') throw new Error('host entry name mismatch') })`], consumer)
+writeFileSync(join(consumer, 'check.mts'), `import { apply as applyHost } from '${pkg.name}'
+import type { RemoteApi } from '${pkg.name}/client'
 import type { Context } from '@deepseek-ai/cordis'
 declare const ctx: Context
 declare const api: RemoteApi
@@ -71,10 +71,10 @@ run(join(consumer, 'node_modules/.bin/tsc'), [
 ], consumer)
 run('node', ['-e', `
   const fs = require('fs')
-  const path = require.resolve('dsh-memory-gate/client')
+  const path = require.resolve('${pkg.name}/client')
   const head = fs.readFileSync(path, 'utf8').slice(0, 200)
   if (!head.startsWith('window.__ModuleLoader__.load({')) throw new Error('client wrapper missing')
-  if (!head.includes('id: "dsh-memory-gate"')) throw new Error('client module id mismatch')
-  console.log('artifact OK:', require('dsh-memory-gate/package.json').version)
+  if (!head.includes('id: "' + '${pkg.name}' + '"')) throw new Error('client module id mismatch')
+  console.log('artifact OK:', require('${pkg.name}/package.json').version)
 `], consumer)
 console.log(`Package artifact passed: ${pkg.name}@${pkg.version}`)

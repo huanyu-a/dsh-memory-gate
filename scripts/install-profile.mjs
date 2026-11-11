@@ -16,6 +16,8 @@
  *   node scripts/install-profile.mjs                 # default desktop profile
  *   node scripts/install-profile.mjs <profile-dir>
  *   node scripts/install-profile.mjs <profile-dir> --dry-run
+ *   node scripts/install-profile.mjs <profile-dir> --allow-running
+ *   node scripts/install-profile.mjs <profile-dir> --wait-for-exit 300
  *
  * The script refuses to touch anything unless the profile looks like a DSH
  * profile, and it always leaves a `.bak-*` copy of package.json and
@@ -25,11 +27,24 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
+import { pruneMemoryGateLock } from './profile-lock.mjs'
+import { dshRunning } from './rollback-profile.mjs'
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
-const profileArg = args.filter((one) => one !== '--dry-run')[0]
+const allowRunning = args.includes('--allow-running')
+const waitFlag = args.indexOf('--wait-for-exit')
+// `--wait-for-exit` alone means "wait the default"; a following number is the timeout.
+const waitSeconds = waitFlag === -1
+  ? undefined
+  : Number.isFinite(Number(args[waitFlag + 1])) ? Number(args[waitFlag + 1]) : 300
+const consumed = new Set(['--dry-run', '--allow-running'])
+if (waitFlag !== -1) {
+  consumed.add('--wait-for-exit')
+  if (Number.isFinite(Number(args[waitFlag + 1]))) consumed.add(args[waitFlag + 1])
+}
+const profileArg = args.filter((one) => !consumed.has(one))[0]
 const profile = resolve(
   profileArg ?? join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '.', '.dsh', 'profiles', 'desktop'),
 )
@@ -40,6 +55,38 @@ const fail = (message) => {
 }
 
 // ---- guards ---------------------------------------------------------------
+
+/**
+ * Block until the desktop app has no processes left.
+ * @param seconds - how long to wait before giving up.
+ * @returns whether the app is gone.
+ */
+async function waitForExit(seconds) {
+  const deadline = Date.now() + seconds * 1000
+  let announced = false
+  while (Date.now() < deadline) {
+    if (!dshRunning()) return true
+    if (!announced) {
+      console.log(`install-profile: DSH is running — waiting up to ${String(seconds)}s for it to exit (quit the app now)`)
+      announced = true
+    }
+    await new Promise(resolve => setTimeout(resolve, 2_000))
+  }
+  return !dshRunning()
+}
+
+// The application rewrites the profile's manifest/lockfile on its own schedule
+// and keeps the plugin's modules loaded, so installing underneath a running
+// app can be undone on exit or leave a half-replaced tree.
+if (!allowRunning && dshRunning()) {
+  if (waitSeconds === undefined) {
+    fail('DSH is still running — quit it completely first, pass --wait-for-exit to let this wait, or --allow-running if you know it is safe')
+  }
+  if (!await waitForExit(waitSeconds)) {
+    fail(`DSH is still running after waiting ${String(waitSeconds)}s — nothing was written`)
+  }
+  console.log('install-profile: DSH has exited, continuing')
+}
 
 if (!existsSync(join(profile, 'package.json'))) {
   fail(`no package.json under ${profile} — is that a DSH profile directory?`)
@@ -58,9 +105,17 @@ if (!existsSync(join(profile, 'pnpm-lock.yaml'))) {
 // profile's pnpm-workspace.yaml. A different global pnpm silently ignores that
 // setting and relinks node_modules into an isolated layout, which leaves the
 // profile with a handful of visible packages instead of the hoisted set.
+// `LOCALAPPDATA` only exists for Windows processes. Run from WSL (where the repo
+// may live on the Linux filesystem) and every root below collapses to a relative
+// path, so the runtime looks missing even though it is installed. Fall back to
+// the Windows user's AppData under /mnt/c when the variable is absent.
+const windowsLocalAppData = process.env['LOCALAPPDATA']
+  ?? (process.env['USERPROFILE'] === undefined || process.env['USERPROFILE'].startsWith('/')
+    ? '/mnt/c/Users/' + (process.env['USER'] ?? 'WIN11') + '/AppData/Local'
+    : join(process.env['USERPROFILE'], 'AppData', 'Local'))
 const runtimeRoots = [
-  join(process.env['LOCALAPPDATA'] ?? '', 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies'),
-  join(process.env['LOCALAPPDATA'] ?? '', 'Programs', 'DeepSeek Harness', 'resources', 'runtime', 'primary-runtime', 'dependencies'),
+  join(windowsLocalAppData, 'dsh-runtimes', 'dsh-primary-runtime', 'dependencies'),
+  join(windowsLocalAppData, 'Programs', 'DeepSeek Harness', 'resources', 'runtime', 'primary-runtime', 'dependencies'),
 ]
 const runtime = runtimeRoots.find((one) => one && existsSync(join(one, 'pnpm', 'bin', 'pnpm.cjs')))
 if (runtime === undefined) {
@@ -68,7 +123,25 @@ if (runtime === undefined) {
 }
 const nodeExe = join(runtime, 'node', 'bin', 'node.exe')
 const pnpmCjs = join(runtime, 'pnpm', 'bin', 'pnpm.cjs')
-const pnpmVersion = execFileSync(nodeExe, [pnpmCjs, '--version'], { encoding: 'utf8' }).trim()
+
+/**
+ * Translate a path for a Windows child process.
+ *
+ * The DSH runtime ships a Windows `node.exe`, so pnpm always runs as a Windows
+ * process with the Windows pnpm build. When this script itself runs under WSL
+ * with the profile on `/mnt/c`, handing it `/mnt/c/...` makes Windows resolve the
+ * path against the current drive (`\\wsl.localhost\Ubuntu\mnt\c\...`) and the
+ * module is not found. Map the `/mnt/<drive>/` prefix to `<DRIVE>:\` first.
+ * @param value - a POSIX or Windows path.
+ * @returns the path in a form the Windows child can open.
+ */
+function forWindows(value) {
+  const mapped = /^\/mnt\/([a-zA-Z])\/(.*)$/.exec(value)
+  if (mapped === null) return value
+  return `${mapped[1].toUpperCase()}:\\${mapped[2].replaceAll('/', '\\')}`
+}
+
+const pnpmVersion = execFileSync(nodeExe, [forWindows(pnpmCjs), '--version'], { encoding: 'utf8' }).trim()
 
 // ---- step 1: build and pack the artifact ---------------------------------
 // Always rebuild and repack. A leftover tarball looks like a valid artifact but
@@ -109,6 +182,18 @@ if (dryRun) {
   process.exit(0)
 }
 
+// Preflight before changing the manifest, artifact or installed tree.
+// dsh-memory-gate@file: records carry a stale integrity hash after repacking.
+const lockPath = join(profile, 'pnpm-lock.yaml')
+let prunedLock
+try {
+  prunedLock = pruneMemoryGateLock(readFileSync(lockPath, 'utf8'), {
+    allowMissing: !existsSync(target) && profilePkg.dependencies?.[pkg.name] === undefined,
+  })
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error))
+}
+
 // ---- step 3: write the profile (backups first) ---------------------------
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')
@@ -116,6 +201,10 @@ for (const name of ['package.json', 'pnpm-lock.yaml']) {
   const from = join(profile, name)
   copyFileSync(from, `${from}.bak-install-${stamp}`)
 }
+
+// Preserve the old artifact too: same-version upgrades overwrite its path.
+const previousTarball = join(profile, tarballName)
+if (existsSync(previousTarball)) copyFileSync(previousTarball, `${previousTarball}.bak-install-${stamp}`)
 
 profilePkg.dependencies = { ...profilePkg.dependencies, [pkg.name]: specifier }
 if (!profilePkg.dsh.profile.bundles.includes(pkg.name)) profilePkg.dsh.profile.bundles.push(pkg.name)
@@ -130,51 +219,16 @@ writeFileSync(profilePkgPath, `${JSON.stringify(profilePkg, null, 2)}\n`, 'utf8'
 copyFileSync(tarball, join(profile, tarballName))
 rmSync(target, { recursive: true, force: true })
 
-const lockPath = join(profile, 'pnpm-lock.yaml')
-const lockLines = readFileSync(lockPath, 'utf8').split(/\r?\n/)
-const dropped = []
-const kept = []
-let skipping = false
-for (const line of lockLines) {
-  // Importer entry: `      dsh-memory-gate:` then its specifier/version lines.
-  if (/^\s{6}dsh-memory-gate:\s*$/.test(line)) {
-    skipping = true
-    dropped.push(line)
-    continue
-  }
-  if (skipping) {
-    if (/^\s{8}(specifier|version):/.test(line)) {
-      dropped.push(line)
-      continue
-    }
-    skipping = false
-  }
-  // Packages entry: `  dsh-memory-gate@file:...:` plus its indented body.
-  if (/^\s{2}dsh-memory-gate@file:.*:\s*$/.test(line)) {
-    skipping = true
-    dropped.push(line)
-    continue
-  }
-  if (skipping) {
-    if (/^\s{4,}/.test(line) || line.trim() === '') {
-      dropped.push(line)
-      continue
-    }
-    skipping = false
-  }
-  kept.push(line)
-}
-if (kept.length === lockLines.length) {
-  fail(`no lockfile record for ${pkg.name} was found in ${lockPath}; cannot force a re-extract safely`)
-}
-writeFileSync(lockPath, kept.join('\n'), 'utf8')
-console.log(`install-profile: dropped ${dropped.length} stale lockfile line(s) for ${pkg.name}`)
+writeFileSync(lockPath, prunedLock.text, 'utf8')
+console.log(`install-profile: dropped ${prunedLock.removed} stale lockfile record(s) for ${pkg.name}`)
 
 // ---- step 5: install with the app's own pnpm ----------------------------
 
 console.log('install-profile: installing…')
-execFileSync(nodeExe, [pnpmCjs, 'install', '--ignore-scripts', '--config.confirmModulesPurge=false'], {
-  cwd: profile,
+execFileSync(nodeExe, [forWindows(pnpmCjs), 'install', '--ignore-scripts', '--config.confirmModulesPurge=false'], {
+  // The child is a Windows process, so its working directory must be a path
+  // Windows understands as well.
+  cwd: forWindows(profile),
   stdio: 'inherit',
 })
 

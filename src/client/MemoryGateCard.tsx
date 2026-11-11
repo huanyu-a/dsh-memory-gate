@@ -17,6 +17,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { validateIdentities, type IdentityProfile, type MemoryGateSection } from '../identities.js'
 import {
+  cleanSection,
   describeNamespaces,
   fieldIssuesOf,
   identityIdsOf,
@@ -26,7 +27,7 @@ import {
   writeSection,
   type FieldIssues,
 } from './ops.js'
-import type { CardTranslate } from './locales.js'
+import type { CardTranslate, MgKey } from './locales.js'
 import { IdentityList } from './IdentityEditor.tsx'
 import { DefaultIdentityField, HeaderNamesField, PolicyFields } from './SectionFields.tsx'
 import type { RemoteApi } from './types.js'
@@ -44,12 +45,12 @@ export interface MemoryGateCardProps {
 }
 
 /** The field findings of an empty section (used before the first load lands). */
-const NO_ISSUES: FieldIssues = { headerName: null, budget: null, defaultMissing: false }
+const NO_ISSUES: FieldIssues = { headerName: null, defaultMissing: false }
 
 /**
- * Render the memory-gate card. Renders nothing while the namespace join has
- * not loaded — the tab only dispatches served namespaces, so a missing answer
- * is a transient (or a read-only mirror), not an empty form.
+ * Render the memory-gate card. Wait for the namespace join before showing an
+ * editor; failed or unavailable reads show an accessible retry instead of an
+ * empty form. A failed refresh never discards an existing draft.
  */
 export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
   const { t, api, subscribe } = props
@@ -66,11 +67,13 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
   const [openIdentities, setOpenIdentities] = useState<boolean[]>([])
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const savingRef = useRef(false)
+  const lifecycle = useRef(0)
   const draftRef = useRef<MemoryGateSection | null>(null)
   const loadGeneration = useRef(0)
   const mounted = useRef(false)
-  const reload = useRef<() => void>(() => {})
-  draftRef.current = draft
+  const reload = useRef<() => Promise<void>>(async () => {})
 
   // Load on first render, and follow external invalidations. A dirty draft
   // survives a reload without rebasing it: a later save still uses the
@@ -78,22 +81,35 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
   // instead of being silently overwritten. Discard reloads the latest baseline.
   useEffect(() => {
     mounted.current = true
+    lifecycle.current += 1
+    savingRef.current = false
+    setSaving(false)
     const load = async (): Promise<void> => {
       const generation = ++loadGeneration.current
-      const join = await describeNamespaces(api)
-      if (!mounted.current || generation !== loadGeneration.current) return
-      setWritable(join.writable)
-      if (join.memoryGate === undefined || draftRef.current !== null) return
-      setLoaded(sectionOf(join.memoryGate))
-      setLoadedRevision(join.memoryGate.revision)
+      try {
+        const join = await describeNamespaces(api)
+        if (!mounted.current || generation !== loadGeneration.current) return
+        setWritable(join.writable)
+        if (join.memoryGate === undefined) {
+          setLoadFailed(true)
+          return
+        }
+        setLoadFailed(false)
+        if (draftRef.current !== null) return
+        setLoaded(sectionOf(join.memoryGate))
+        setLoadedRevision(join.memoryGate.revision)
+      } catch {
+        if (mounted.current && generation === loadGeneration.current) setLoadFailed(true)
+      }
     }
-    reload.current = () => { void load() }
+    reload.current = load
     void load()
     const unsubscribe = subscribe(() => { void load() })
     return () => {
       mounted.current = false
+      lifecycle.current += 1
       loadGeneration.current += 1
-      reload.current = () => {}
+      reload.current = async () => {}
       unsubscribe()
     }
   }, [api, subscribe])
@@ -113,10 +129,29 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
     [current],
   )
 
-  if (loaded === undefined || current === undefined) return null
+  const loadError = loadFailed ? (
+    <div role="alert" className="mg-failed">
+      <p>{t('loadFailed')}</p>
+      <button type="button" className="mg-button" disabled={saving} onClick={() => { void reload.current() }}>
+        {t('retry')}
+      </button>
+    </div>
+  ) : null
+
+  if (loaded === undefined || current === undefined) {
+    return loadError === null ? null : (
+      <li className="mg-card mg-card-open">
+        <div className="mg-card-header"><span className="mg-card-name">{t('cardTitle')}</span></div>
+        <div className="mg-card-body">{loadError}</div>
+      </li>
+    )
+  }
 
   const edit = (next: MemoryGateSection): void => {
-    setDraft(next)
+    // Clear the ref in the event itself: a refresh can land before React renders.
+    const nextDraft = sameSection(next, loaded) ? null : next
+    draftRef.current = nextDraft
+    setDraft(nextDraft)
     setFailed(null)
   }
   const patch = (fields: Partial<MemoryGateSection>): void => { edit({ ...current, ...fields }) }
@@ -155,29 +190,36 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
   }
 
   const onSave = async (): Promise<void> => {
-    if (saving) return
+    if (savingRef.current || loadedRevision === undefined) return
+    const owner = lifecycle.current
+    savingRef.current = true
     setSaving(true)
     setFailed(null)
     try {
       const reply = await writeSection(api, current, undefined, loadedRevision)
-      if (!mounted.current) return
+      if (!mounted.current || owner !== lifecycle.current) return
       if (reply.ok) {
+        // Acknowledged writes are committed even if the subsequent read fails.
+        // Do not reuse the pre-save revision or present committed values as dirty.
+        loadGeneration.current += 1
+        setLoaded(cleanSection(current))
+        setLoadedRevision(undefined)
         draftRef.current = null
         setDraft(null)
-        const generation = ++loadGeneration.current
-        const join = await describeNamespaces(api)
-        if (!mounted.current || generation !== loadGeneration.current) return
-        setWritable(join.writable)
-        if (join.memoryGate !== undefined) {
-          setLoaded(sectionOf(join.memoryGate))
-          setLoadedRevision(join.memoryGate.revision)
-        }
+        await reload.current()
       } else {
         setFailed(reply.error)
         console.error(`[dsh-memory-gate] section save failed: ${reply.error}`)
       }
+    } catch (error) {
+      if (mounted.current && owner === lifecycle.current) {
+        setFailed(error instanceof Error ? error.message : String(error))
+      }
     } finally {
-      if (mounted.current) setSaving(false)
+      if (mounted.current && owner === lifecycle.current) {
+        savingRef.current = false
+        setSaving(false)
+      }
     }
   }
   const onDiscard = (): void => {
@@ -185,18 +227,21 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
     setDraft(null)
     setFailed(null)
     setOpenIdentities((flags) => flags.map(() => false))
-    reload.current()
+    void reload.current()
   }
 
-  const disabled = !writable || saving
-  // Every gate the host would refuse is closed here first: a dangling identity
-  // would detach its sessions, a blank header name would be replaced by the
-  // defaults, and a non-positive ceiling would detach every new session.
-  const blocked = !writable || !dirty || saving
+  const disabled = !writable || saving || loadedRevision === undefined
+  // Block known draft errors locally; the host remains the authoritative
+  // validator for configured-name collisions and other section constraints.
+  // After a confirmed save, wait for its revision before allowing more edits.
+  const blocked = disabled || !dirty
     || issues.length > 0
     || fieldIssues.headerName !== null
-    || fieldIssues.budget !== null
     || fieldIssues.defaultMissing
+  // Identity findings are rendered inside a disclosure, so a user who has it
+  // collapsed sees only a greyed button. Name the first blocking cause here.
+  const blockedReason: MgKey | null = fieldIssues.headerName ?? (fieldIssues.defaultMissing ? 'issueDefaultMissing' : null)
+    ?? (issues.length > 0 ? 'issueSaveBlockedByIdentity' : null)
 
   return (
     <li className="mg-card mg-card-open">
@@ -208,6 +253,7 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
         {dirty ? <span className="mg-tag">{t('unsaved')}</span> : null}
       </div>
       <div className="mg-card-body">
+        {loadError}
         {!writable ? <p className="mg-readonly" role="status">{t('readOnly')}</p> : null}
         <div className="mg-notes">
           <p className="mg-hint">{t('proxyNote')}</p>
@@ -246,13 +292,15 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
         <PolicyFields
           section={current}
           disabled={disabled}
-          invalid={fieldIssues.budget}
           t={t}
           onPatch={patch}
         />
 
         <div className="mg-card-footer">
           {failed !== null ? <p className="mg-failed" role="status">{`${t('saveFailed')} (${failed})`}</p> : null}
+          {/* The Save button is disabled by findings that can live inside a
+              collapsed identity; say why here so it is never a silent dead end. */}
+          {blockedReason === null ? null : <p className="mg-issue" role="alert">{t(blockedReason)}</p>}
           <button
             type="button"
             className="mg-button"

@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -69,6 +70,15 @@ describe('dshHome / storeDir', () => {
   it('falls back to a relative .dsh when the environment names no home', () => {
     expect(dshHome({})).toBe('.dsh')
   })
+
+  it('is part of the built bundle so the maintenance CLI can import it', async () => {
+    // scripts/session-pins.mjs resolves the storage directory through this
+    // export instead of keeping a copy of the rule; losing the export would
+    // leave the CLI silently looking in the wrong place.
+    const bundle = await import('../lib/index.js')
+    expect(bundle.storeDir).toBeTypeOf('function')
+    expect(bundle.storeDir({ DSH_HOME: '/srv/dsh' })).toBe(join('/srv/dsh', 'storage', 'memory-gate'))
+  })
 })
 
 describe('createSessionStore', () => {
@@ -87,6 +97,194 @@ describe('createSessionStore', () => {
     expect(reloaded.size()).toBe(1)
     expect(reloaded.get('session-1')).toEqual(stored)
     expect(reloaded.get('other')).toBeUndefined()
+  })
+
+  it('round-trips the immutable attachment snapshot and its migration marker', () => {
+    const dir = tempRoot()
+    const store = createSessionStore(dir)
+    const snapshot = {
+      identity: { id: 'main', team: 'team-a', agent: 'a', task: '', headers: [{ name: 'X-Tenant', value: 'acme' }] },
+      headerNames: { team: 'X-Team', agent: 'X-Agent', task: 'X-Task' },
+      sessionHeader: false,
+    }
+    const stored = pin({ snapshot, migratedAt: 77 })
+    store.set('session-1', stored)
+    store.flush()
+
+    const reloaded = createSessionStore(dir)
+    expect(reloaded.get('session-1')).toEqual(stored)
+    expect(reloaded.get('session-1')?.snapshot?.identity.headers).toEqual([{ name: 'X-Tenant', value: 'acme' }])
+  })
+
+  it('drops a partially invalid snapshot whole rather than attaching half an identity', () => {
+    const dir = tempRoot()
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: {
+        'no-id': { ...pin(), snapshot: { identity: { team: 't' }, headerNames: {}, sessionHeader: true } },
+        'bad-rows': { ...pin(), snapshot: {
+          identity: { id: 'main', headers: ['x'] }, headerNames: {}, sessionHeader: true,
+        } },
+        legacy: pin(),
+      },
+    }))
+    const store = createSessionStore(dir)
+    expect(store.get('no-id')).toEqual(pin())
+    expect(store.get('bad-rows')).toEqual(pin())
+    // A legacy pin stays id-only: the gate migrates it, not the loader.
+    expect(store.get('legacy')).toEqual(pin())
+  })
+
+  it('drops a snapshot whose rows the stricter header rules now reject', () => {
+    // Upgrade note: a row that overrides a configured header name, or repeats a
+    // name, was once accepted. Such a pin is now dropped, so the session falls
+    // back to a fresh decision at the next request instead of replaying a
+    // snapshot that could overwrite the identity it claims to pin.
+    const dir = tempRoot()
+    const names = { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' }
+    const snapshot = (headers: unknown[]) => ({
+      identity: { id: 'main', team: 't', agent: 'a', task: '', headers },
+      headerNames: names, sessionHeader: true,
+    })
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: {
+        'ok': { ...pin({ identity: 'main' }), snapshot: snapshot([{ name: 'x-extra', value: 'v' }]), migratedAt: 1 },
+        'overrides-team': { ...pin({ identity: 'main' }), snapshot: snapshot([{ name: 'X-Team-Id', value: 'v' }]), migratedAt: 1 },
+        'repeats-name': { ...pin({ identity: 'main' }), snapshot: snapshot([{ name: 'x-a', value: '1' }, { name: 'X-A', value: '2' }]), migratedAt: 1 },
+      },
+    }))
+    const store = createSessionStore(dir)
+    expect(store.get('ok')?.snapshot).toBeDefined()
+    // Dropped to an id-only pin: the session re-decides instead of replaying it.
+    expect(store.get('overrides-team')?.snapshot).toBeUndefined()
+    expect(store.get('repeats-name')?.snapshot).toBeUndefined()
+  })
+
+  it('leaves no temp file behind when a write fails', () => {
+    // flush() writes a .tmp-<pid> file then renames it. When the rename fails
+    // the temp file used to survive, one per failed attempt, for the life of
+    // the process.
+    const dir = tempRoot()
+    mkdirSync(dir, { recursive: true })
+    // A directory at the destination makes rename fail without losing data.
+    mkdirSync(join(dir, 'sessions.json'))
+    const store = createSessionStore(dir)
+    store.set('session-1', pin({ identity: 'main' }))
+    store.flush()
+    const leftovers = readdirSync(dir).filter(name => name.includes('.tmp-'))
+    expect(leftovers).toEqual([])
+  })
+
+  it('ignores a snapshot that names a different identity than the pin', () => {
+    // A hand-edited file must not let a pin attach an identity it never chose.
+    const dir = tempRoot()
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: {
+        'edited': {
+          ...pin({ identity: 'main' }),
+          snapshot: {
+            identity: { id: 'intruder', team: 'evil', agent: '', task: '', headers: [] },
+            headerNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+            sessionHeader: true,
+          },
+        },
+        'cased': {
+          ...pin({ identity: 'Main' }),
+          snapshot: {
+            identity: { id: 'main', team: 't', agent: '', task: '', headers: [] },
+            headerNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+            sessionHeader: true,
+          },
+        },
+      },
+    }))
+    const store = createSessionStore(dir)
+    expect(store.get('edited')?.snapshot).toBeUndefined()
+    // The gate compares ids case-insensitively, and so does the loader.
+    expect(store.get('cased')?.snapshot?.identity.id).toBe('main')
+  })
+
+  it('rejects a snapshot with any missing or wrongly typed field', () => {
+    // Every field must round-trip exactly: a coerced default would replay a
+    // header set the session never sent.
+    const dir = tempRoot()
+    const good = {
+      identity: { id: 'main', team: 't', agent: '', task: '', headers: [] },
+      headerNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+      sessionHeader: true,
+    }
+    const variants: Record<string, unknown> = {
+      'no-session-header': { ...good, sessionHeader: 'yes' },
+      'no-task-name': { ...good, headerNames: { team: 'x-team-id', agent: 'x-agent-id' } },
+      'numeric-team': { ...good, identity: { ...good.identity, team: 42 } },
+      'no-headers-row': { ...good, identity: { id: 'main', team: 't' } },
+      'bad-row-value': { ...good, identity: { ...good.identity, headers: [{ name: 'X', value: 1 }] } },
+    }
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: Object.fromEntries(Object.entries(variants).map(([key, snapshot]) => [key, { ...pin(), snapshot }])),
+    }))
+    const store = createSessionStore(dir)
+    for (const key of Object.keys(variants)) expect(store.get(key)).toEqual(pin())
+  })
+
+  it('rejects a snapshot whose header names break the settings write rules', () => {
+    // A hand-edited file must not let a pinned session key the conversation
+    // through the reserved session header, lose a triple to a duplicate, or
+    // send an empty header name.
+    const dir = tempRoot()
+    const snapshot = (names: Record<string, string>, headers: Array<{ name: string, value: string }> = []) => ({
+      identity: { id: 'main', team: 't', agent: 'a', task: '', headers },
+      headerNames: names,
+      sessionHeader: false,
+    })
+    const reserved = { team: 'x-deepseek-harness-session-id', agent: 'x-agent-id', task: 'x-task-id' }
+    const duplicate = { team: 'X-Id', agent: 'x-id', task: 'x-task-id' }
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: {
+        reserved: { ...pin(), snapshot: snapshot(reserved) },
+        duplicate: { ...pin(), snapshot: snapshot(duplicate) },
+        'empty-row-with-value': { ...pin(), snapshot: snapshot({ team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' }, [{ name: '', value: 'v' }]) },
+        'teamless': { ...pin(), snapshot: { ...snapshot({ team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' }), identity: { id: 'main', team: '  ', agent: '', task: '', headers: [] } } },
+        valid: { ...pin(), snapshot: snapshot({ team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' }) },
+      },
+    }))
+    const store = createSessionStore(dir)
+    for (const key of ['reserved', 'duplicate', 'empty-row-with-value', 'teamless']) expect(store.get(key)).toEqual(pin())
+    expect(store.get('valid')).toMatchObject({ snapshot: { headerNames: { team: 'x-team-id' } } })
+  })
+
+  it('drops a migration marker that has no usable snapshot with it', () => {
+    // A marker without a snapshot would claim the pin is frozen while it still
+    // tracks live configuration; the gate must be free to migrate it again.
+    const dir = tempRoot()
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: { incoherent: { ...pin(), migratedAt: 555, snapshot: { identity: { id: 'main' } } } },
+    }))
+    expect(createSessionStore(dir).get('incoherent')).toEqual(pin())
+  })
+
+  it('round-trips a detached pin’s removal names and drops unusable ones', () => {
+    const dir = tempRoot()
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: {
+        good: { ...pin({ identity: null }), removeHeaderNames: { team: 'X-Team', agent: 'X-Agent', task: 'X-Task' } },
+        'bad-name': { ...pin({ identity: null }), removeHeaderNames: { team: 'bad name', agent: 'X-Agent', task: 'X-Task' } },
+        'on-attach': { ...pin(), removeHeaderNames: { team: 'X-Team', agent: 'X-Agent', task: 'X-Task' } },
+      },
+    }))
+    const store = createSessionStore(dir)
+    expect(store.get('good')?.removeHeaderNames).toEqual({ team: 'X-Team', agent: 'X-Agent', task: 'X-Task' })
+    // Only deletion is affected, so an unusable name is dropped, not the pin.
+    expect(store.get('bad-name')).toEqual(pin({ identity: null }))
+    // A pin that could not freeze its values still remembers the names, so a
+    // later rename can clean them up; an unusable triple is dropped instead.
+    expect(store.get('on-attach')?.removeHeaderNames).toEqual({ team: 'X-Team', agent: 'X-Agent', task: 'X-Task' })
   })
 
   it('deletes a pin and persists the deletion', () => {
@@ -120,6 +318,42 @@ describe('createSessionStore', () => {
     expect(store.size()).toBe(2)
     expect([...storeKeys(dir)].sort()).toEqual(['middle', 'newest'])
     expect(createSessionStore(dir, 2).get('old')).toBeUndefined()
+  })
+
+  it('does not evict a legacy pin in the same flush that migrates it', () => {
+    // `at` stays at the original decision time, so eviction must order by the
+    // later of at/migratedAt — otherwise the migration work is discarded at once.
+    const dir = tempRoot()
+    const store = createSessionStore(dir, 2)
+    store.set('migrated', pin({ at: 1, migratedAt: 99 }))
+    store.set('plain', pin({ at: 2 }))
+    store.set('newest', pin({ at: 3 }))
+    store.flush()
+
+    expect([...storeKeys(dir)].sort()).toEqual(['migrated', 'newest'])
+  })
+
+  it('re-pins a session after deletion and drops an empty identity id on load', () => {
+    const dir = tempRoot()
+    const store = createSessionStore(dir)
+    store.set('revived', pin({ at: 1 }))
+    store.flush()
+    store.delete('revived')
+    store.flush()
+    expect(store.get('revived')).toBeUndefined()
+
+    store.set('revived', pin({ at: 5 }))
+    store.flush()
+    // The file keeps exactly the re-pinned session, with no leftover fields.
+    expect(readJSON(join(dir, 'sessions.json'))).toEqual({ version: 1, sessions: { revived: pin({ at: 5 }) } })
+
+    // An empty id could never match an identity, so the record is dropped
+    // instead of pinning the session to a permanent "identity missing" detach.
+    writeFileSync(join(dir, 'sessions.json'), JSON.stringify({
+      version: 1,
+      sessions: { blank: { ...pin(), identity: '   ' } },
+    }))
+    expect(createSessionStore(dir).get('blank')).toBeUndefined()
   })
 
   it('keeps the documented default bound', () => {
@@ -158,6 +392,24 @@ describe('createSessionStore', () => {
     const store = createSessionStore(dir)
     store.flush()
     expect(existsSync(dir)).toBe(false)
+  })
+
+  it('keeps a copy of an unreadable pin file before overwriting it', () => {
+    // A corrupt file is the one moment a rewrite must not be silent: the next
+    // flush would otherwise erase every session it failed to parse.
+    const dir = tempRoot()
+    writeFileSync(join(dir, 'sessions.json'), 'not json at all')
+
+    const store = createSessionStore(dir)
+    expect(store.size()).toBe(0)
+
+    const backups = readdirSync(dir).filter(name => name.startsWith('sessions.json.corrupt-'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe('not json at all')
+
+    store.set('fresh', pin())
+    store.flush()
+    expect(createSessionStore(dir).get('fresh')).toEqual(pin())
   })
 
   it('writes the first pin of a run synchronously, so a crash cannot forget it', () => {

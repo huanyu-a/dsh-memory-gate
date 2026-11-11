@@ -7,7 +7,7 @@
  * @module dsh-memory-gate/client/ops
  */
 
-import { MEMORY_GATE_FIELD, MEMORY_GATE_NS, PI_AI_NS } from '../constants.js'
+import { DSH_SESSION_HEADER, MEMORY_GATE_FIELD, MEMORY_GATE_NS, PI_AI_NS } from '../constants.js'
 import { isRecord, normalizeSection, type IdentityProfile, type MemoryGateSection } from '../identities.js'
 import type { SettingsPathOpView } from '@deepseek-ai/dsh-settings/types'
 import type { RemoteApi, SettingsJoin, SettingsNamespaceView, WriteReply } from './types.js'
@@ -40,18 +40,32 @@ export function newIdentity(): IdentityProfile {
 
 /**
  * The non-identity findings the editor raises before a save reaches the host.
- * Identity-level problems come from the shared `validateIdentities`; these
- * three fields have no host validator (a blank header name would be silently
- * replaced by the defaults on normalize, and a non-positive ceiling would
- * detach every session), so the card gates them itself.
+ * Identity-level problems come from the shared `validateIdentities`; these two
+ * fields have no host validator (a blank header name would be silently
+ * replaced by the defaults on normalize, and a dangling default identity would
+ * silently detach memory), so the card gates them itself.
  */
 export interface FieldIssues {
   /** Locale key of the header-name finding, when one exists. */
-  headerName: 'issueHeaderNameEmpty' | 'issueHeaderNameInvalid' | null
-  /** Locale key of the budget finding, when one exists. */
-  budget: 'issueBudget' | null
+  headerName: 'issueHeaderNameEmpty' | 'issueHeaderNameInvalid' | 'issueHeaderNameDuplicate' | 'issueHeaderNameReserved' | null
   /** Whether the default identity names an id absent from the list. */
   defaultMissing: boolean
+}
+
+/**
+ * Check the three configured header names against the rules the host enforces
+ * at save time, so the card can refuse a save the host would reject anyway.
+ * @param names - the configured header names, already trimmed.
+ * @returns the locale key of the first failing rule, or null.
+ */
+function headerNameIssue(names: string[]): FieldIssues['headerName'] {
+  if (names.some(name => name.length === 0)) return 'issueHeaderNameEmpty'
+  if (!names.every(name => headerNameValid(name))) return 'issueHeaderNameInvalid'
+  // The session header is the conversation key: a fixed value there would merge
+  // every session into one proxy conversation.
+  if (names.some(name => name.toLowerCase() === DSH_SESSION_HEADER.toLowerCase())) return 'issueHeaderNameReserved'
+  if (new Set(names.map(name => name.toLowerCase())).size !== names.length) return 'issueHeaderNameDuplicate'
+  return null
 }
 
 /** Whether a header NAME is representable as a Fetch header (the host's save-time rule). */
@@ -71,15 +85,11 @@ function headerNameValid(name: string): boolean {
 export function fieldIssuesOf(section: MemoryGateSection): FieldIssues {
   const names = [section.headerNames.team, section.headerNames.agent, section.headerNames.task]
   const namesTrimmed = names.map(name => name.trim())
-  const headerName = namesTrimmed.some(name => name.length === 0)
-    ? 'issueHeaderNameEmpty'
-    : namesTrimmed.every(name => headerNameValid(name)) ? null : 'issueHeaderNameInvalid'
-  const tokens = section.budget.maxRequestTokens
-  const budget = Number.isInteger(tokens) && tokens >= 1 ? null : 'issueBudget'
+  const headerName = headerNameIssue(namesTrimmed)
   const defaultId = section.defaultIdentity.trim()
   const defaultMissing = defaultId.length > 0
     && !section.identities.some(identity => identity.id.trim().toLowerCase() === defaultId.toLowerCase())
-  return { headerName, budget, defaultMissing }
+  return { headerName, defaultMissing }
 }
 
 /** The distinct identity ids in the section, trimmed and case-deduplicated (first spelling wins). */
@@ -144,6 +154,7 @@ export async function writeModelPick(
     try {
       const join = await describe()
       if (join.piAi === undefined) return { ok: false, error: 'no-namespace' }
+      if (!join.writable) return { ok: false, error: 'read-only' }
       const providers = providersOf(join.piAi)
       const rawModels = providers[route]?.['models']
       if (!Array.isArray(rawModels)) return { ok: false, error: 'model-not-found' }
@@ -181,7 +192,7 @@ export async function writeModelPick(
 /**
  * The section as it is written: ids and header names trimmed, fully-blank
  * extra header rows dropped (they are editing artifacts the editor leaves
- * behind), the token ceiling floored to a whole number. Nothing else is
+ * behind). Nothing else is
  * coerced — the host's registration validator is the gate for invalid data,
  * and its refusal is surfaced verbatim.
  * @param section - the staged section.
@@ -203,11 +214,8 @@ export function cleanSection(section: MemoryGateSection): MemoryGateSection {
       agent: section.headerNames.agent.trim(),
       task: section.headerNames.task.trim(),
     },
-    budget: {
-      enabled: section.budget.enabled,
-      maxRequestTokens: Math.floor(section.budget.maxRequestTokens),
-    },
     sessionHeader: section.sessionHeader,
+    trustedOrigins: [...section.trustedOrigins],
   }
 }
 
@@ -236,8 +244,8 @@ export async function writeSection(
     setOp(['identities'], cleaned.identities),
     setOp(['defaultIdentity'], cleaned.defaultIdentity),
     setOp(['headerNames'], cleaned.headerNames),
-    setOp(['budget'], cleaned.budget),
     setOp(['sessionHeader'], cleaned.sessionHeader),
+    setOp(['trustedOrigins'], cleaned.trustedOrigins),
   ]
   for (let attempt = 0; attempt < 2; attempt++) {
     try {

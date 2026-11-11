@@ -9,7 +9,7 @@
  * @module dsh-memory-gate/client/ModelGateSelect
  */
 
-import { useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { MgKey } from './locales.js'
 import type { WriteReply } from './types.js'
@@ -44,7 +44,18 @@ export interface ModelGateSelectProps {
 
 /** Render one model row's memory-identity picker. */
 export function ModelGateSelect(props: ModelGateSelectProps): ReactNode {
+  // A reused row must not inherit another target's pending write or error.
+  return <ModelGatePicker key={JSON.stringify([props.route, props.modelId])} {...props} />
+}
+
+function ModelGatePicker(props: ModelGateSelectProps): ReactNode {
   const { t } = props
+  const active = useRef(false)
+  const pending = useRef(false)
+  useEffect(() => {
+    active.current = true
+    return () => { active.current = false }
+  }, [])
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
   const statusId = useId()
@@ -66,18 +77,25 @@ export function ModelGateSelect(props: ModelGateSelectProps): ReactNode {
     : failed !== null ? `${t('modelPickerWriteFailed')}: ${failed}` : null
 
   const onChange = async (next: string): Promise<void> => {
+    if (disabled || pending.current || !active.current) return
+    pending.current = true
     setSaving(true)
     setFailed(null)
+    const reportFailure = (error: string): void => {
+      if (!active.current) return
+      setFailed(error)
+      console.error(`[dsh-memory-gate] pick write failed for "${props.route}/${props.modelId}": ${error}`)
+    }
     try {
       const reply = await props.onPick(props.route, props.modelId, next === '' ? null : next)
-      if (!reply.ok) {
-        setFailed(reply.error)
-        console.error(`[dsh-memory-gate] pick write failed for "${props.route}/${props.modelId}": ${reply.error}`)
-      }
+      if (!reply.ok) reportFailure(reply.error)
       // On success the document-updated invalidation re-scans and the next
       // props carry the stored pick; nothing optimistic to commit here.
+    } catch (error) {
+      reportFailure(error instanceof Error ? error.message : String(error))
     } finally {
-      setSaving(false)
+      pending.current = false
+      if (active.current) setSaving(false)
     }
   }
 

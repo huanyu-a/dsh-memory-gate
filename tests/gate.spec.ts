@@ -29,7 +29,7 @@ function section(overrides: Partial<MemoryGateSection> = {}): MemoryGateSection 
 
 /** One request literal with the given overrides. */
 function request(overrides: Partial<GateRequest> = {}): GateRequest {
-  return { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-1', estimatedTokens: undefined, ...overrides }
+  return { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-1', ...overrides }
 }
 
 /** One pin literal with the given overrides. */
@@ -57,11 +57,31 @@ describe('non-memory-chain requests', () => {
     }
   })
 
-  it('never pins a skipped session, even with a pick and a budget that would detach', () => {
+  it.each([
+    'http://other.example:8096/v1', 'https://memory.example/v1', 'https://tdai.example/v1',
+    'https://evil.example/path/:8096/', 'http://127.0.0.1.evil.example:8096/v1',
+    'http://user:secret@127.0.0.1:8096/v1', 'http://127.0.0.1:8097/v1',
+    'https://127.0.0.1:8096/v1', 'ftp://127.0.0.1:8096/v1', 'not a URL',
+  ])('never attaches headers or reuses a pin for untrusted URL %j', baseURL => {
+    expect(decide({ request: request({ baseURL }), pin: pin() }))
+      .toEqual({ kind: 'skip', headers: {}, reason: 'not-memory-chain' })
+  })
+
+  it('honors explicit origins rather than the default', () => {
+    const configured = section({ trustedOrigins: ['https://proxy.example:8443'] })
+    expect(decide({ section: configured, request: request({ baseURL: 'https://proxy.example:8443/v1' }) }).kind).toBe('attach')
+    expect(decide({ section: configured }).kind).toBe('skip')
+  })
+
+  it('denies all origins when configured empty, including pinned requests', () => {
+    expect(decide({ section: section({ trustedOrigins: [] }), pin: pin() }))
+      .toEqual({ kind: 'skip', headers: {}, reason: 'not-memory-chain' })
+  })
+
+  it('never pins a skipped session, even when the model pick would detach', () => {
     const decision = decide({
-      request: request({ baseURL: 'https://api.stepfun.com/v1', estimatedTokens: 999_999 }),
+      request: request({ baseURL: 'https://api.stepfun.com/v1' }),
       pick: 'off',
-      section: section({ budget: { enabled: true, maxRequestTokens: 1 } }),
     })
     expect(decision.pin).toBeUndefined()
   })
@@ -73,8 +93,16 @@ describe('detaching by model pick', () => {
     expect(decision).toEqual({
       kind: 'detach',
       headers: {},
+      removeHeaders: ['x-team-id', 'x-agent-id', 'x-task-id', 'x-deepseek-harness-session-id'],
       reason: 'model-detached',
-      pin: { identity: null, reason: 'model-detached', at: NOW, provider: 'magpie', model: 'm1' },
+      pin: {
+        identity: null,
+        reason: 'model-detached',
+        at: NOW,
+        provider: 'magpie',
+        model: 'm1',
+        removeHeaderNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+      },
     })
   })
 
@@ -92,7 +120,11 @@ describe('detaching for missing configuration', () => {
     expect(decision.reason).toBe('no-default-identity')
     // A session exists, so the decision is pinned: later configuration must
     // not resurrect memory in a session that already ran unidentified.
-    expect(decision.pin).toEqual({ identity: null, reason: 'no-default-identity', at: NOW, provider: 'magpie', model: 'm1' })
+    expect(decision.pin).toMatchObject({
+      identity: null,
+      reason: 'no-default-identity',
+      removeHeaderNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+    })
   })
 
   it('treats a default identity that does not exist as "no default"', () => {
@@ -105,8 +137,16 @@ describe('detaching for missing configuration', () => {
     expect(decision).toEqual({
       kind: 'detach',
       headers: {},
+      removeHeaders: ['x-team-id', 'x-agent-id', 'x-task-id', 'x-deepseek-harness-session-id'],
       reason: 'identity-missing',
-      pin: { identity: null, reason: 'identity-missing', at: NOW, provider: 'magpie', model: 'm1' },
+      pin: {
+        identity: null,
+        reason: 'identity-missing',
+        at: NOW,
+        provider: 'magpie',
+        model: 'm1',
+        removeHeaderNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+      },
     })
   })
 
@@ -130,7 +170,14 @@ describe('attaching an identity', () => {
       'x-task-id': 'task-a',
       'x-deepseek-harness-session-id': 'session-1',
     })
-    expect(decision.pin).toEqual({ identity: 'main', reason: 'attached', at: NOW, provider: 'magpie', model: 'm1' })
+    expect(decision.pin).toMatchObject({ identity: 'main', reason: 'attached', at: NOW, provider: 'magpie', model: 'm1' })
+    // A fresh attachment persists the values it used, not just the identity id.
+    expect(decision.pin?.snapshot).toEqual({
+      identity: identity(),
+      headerNames: defaultSection().headerNames,
+      sessionHeader: true,
+    })
+    expect(decision.pin?.migratedAt).toBeUndefined()
   })
 
   it('honours header-name overrides and extra rows', () => {
@@ -180,46 +227,6 @@ describe('attaching an identity', () => {
   })
 })
 
-describe('the budget gate', () => {
-  it('detaches and pins once the estimated request size exceeds the limit', () => {
-    const decision = decide({
-      section: section({ budget: { enabled: true, maxRequestTokens: 100 } }),
-      request: request({ estimatedTokens: 101 }),
-    })
-    expect(decision).toEqual({
-      kind: 'detach',
-      headers: {},
-      reason: 'budget-exceeded',
-      pin: { identity: null, reason: 'budget-exceeded', at: NOW, provider: 'magpie', model: 'm1' },
-    })
-  })
-
-  it('attaches exactly at the limit (the comparison is strict)', () => {
-    const decision = decide({
-      section: section({ budget: { enabled: true, maxRequestTokens: 100 } }),
-      request: request({ estimatedTokens: 100 }),
-    })
-    expect(decision.kind).toBe('attach')
-  })
-
-  it('does nothing when the budget gate is disabled or no estimate was observed', () => {
-    expect(decide({ request: request({ estimatedTokens: 999_999 }) }).kind).toBe('attach')
-    expect(decide({
-      section: section({ budget: { enabled: true, maxRequestTokens: 1 } }),
-      request: request({ estimatedTokens: undefined }),
-    }).kind).toBe('attach')
-  })
-
-  it('detaches a session that has no session id without pinning', () => {
-    const decision = decide({
-      section: section({ budget: { enabled: true, maxRequestTokens: 1 } }),
-      request: request({ sessionId: undefined, estimatedTokens: 2 }),
-    })
-    expect(decision.reason).toBe('budget-exceeded')
-    expect(decision.pin).toBeUndefined()
-  })
-})
-
 describe('the pinned decision of a session', () => {
   it('reuses a pinned attachment even after the model pick changed to "off"', () => {
     // This is the reason pinning exists: the proxy's `bypassed` state is
@@ -229,18 +236,118 @@ describe('the pinned decision of a session', () => {
     expect(decision.reason).toBe('pinned')
     expect(decision.headers['x-team-id']).toBe('team-a')
     expect(decision.headers['x-deepseek-harness-session-id']).toBe('session-1')
-    // No new pin: the existing one stays authoritative.
+    // A legacy id-only pin is migrated in place; nothing else changes.
+    expect(decision.pin).toMatchObject({ identity: 'main', at: 1, reason: 'attached', migratedAt: NOW })
+  })
+
+  it('records the header names on a new pin, and nothing at all when they are unusable', () => {
+    // Write/read symmetry: the loader rejects an unusable triple, so the gate
+    // must not persist one either — otherwise a rename would lose the cleanup.
+    const good = decide({ request: { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 's' } })
+    expect(good.pin?.removeHeaderNames).toEqual({ team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' })
+
+    const invalid = decide({
+      request: { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 's' },
+      // A case-insensitive duplicate: the settings writer refuses it outright.
+      section: section({ headerNames: { team: 'X-Id', agent: 'x-id', task: 'x-task-id' } }),
+    })
+    expect(invalid.kind).toBe('attach')
+    expect(invalid.pin?.snapshot).toBeUndefined()
+    expect(invalid.pin?.removeHeaderNames).toBeUndefined()
+  })
+
+  it('ignores a snapshot whose identity disagrees with the pin', () => {
+    // Defence in depth: the loader already drops such a snapshot, but a pin
+    // built by another caller must not attach an identity it never chose.
+    const decision = decide({
+      pin: {
+        ...pin({ identity: 'main' }),
+        snapshot: {
+          identity: identity({ id: 'intruder', team: 'evil' }),
+          headerNames: defaultSection().headerNames,
+          sessionHeader: true,
+        },
+      },
+    })
+    expect(decision.kind).toBe('attach')
+    expect(decision.headers['x-team-id']).toBe('team-a')
+    expect(decision.headers['x-agent-id']).toBe('agent-a')
+  })
+
+  it('does not freeze an invalid live value into a new pin', () => {
+    // A composition-base value that never met the write validator must stay
+    // repairable: the request attaches now, but nothing is snapshot.
+    const decision = decide({ section: section({ identities: [identity({ team: '  ' })] }) })
+    expect(decision.kind).toBe('attach')
+    expect(decision.pin).toMatchObject({ identity: 'main' })
+    expect(decision.pin?.snapshot).toBeUndefined()
+  })
+
+  it('refuses to snapshot header names the settings write path would reject', () => {
+    const decision = decide({
+      section: section({ headerNames: { team: 'x-deepseek-harness-session-id', agent: 'x-agent-id', task: 'x-task-id' } }),
+    })
+    expect(decision.kind).toBe('attach')
+    expect(decision.pin?.snapshot).toBeUndefined()
+  })
+
+  it('leaves a legacy pin unmigrated while the live value is invalid', () => {
+    // Otherwise a transient misconfiguration would become permanent for this
+    // session, and repairing the config could no longer repair it.
+    const decision = decide({ pin: pin(), section: section({ identities: [identity({ headers: [{ name: 'bad name', value: 'v' }] })] }) })
+    expect(decision.kind).toBe('attach')
     expect(decision.pin).toBeUndefined()
   })
 
-  it('reuses a pinned attachment even after the budget would now detach', () => {
+  it('migrates a legacy pin without refreshing its original decision time', () => {
+    // Keeping `at` matters: pruning keeps the newest pins, so a migration that
+    // stamped a fresh time could keep a pin the store would otherwise evict —
+    // and refreshing it is not this decision's business either way.
+    const decision = decide({ pin: pin({ at: 5 }) })
+    expect(decision.pin?.at).toBe(5)
+    expect(decision.pin?.migratedAt).toBe(NOW)
+  })
+
+  it('reproduces pinned values after the identity and shaping changed', () => {
+    // The core of the snapshot contract: editing config must not rewrite a
+    // live session's identity, header names or session-header switch.
     const decision = decide({
-      pin: pin(),
-      section: section({ budget: { enabled: true, maxRequestTokens: 1 } }),
-      request: request({ estimatedTokens: 1000 }),
+      pin: {
+        ...pin(),
+        snapshot: {
+          identity: identity({ team: 'old-team', headers: [{ name: 'X-Old', value: 'v1' }] }),
+          headerNames: { team: 'X-Old-Team', agent: 'X-Old-Agent', task: 'X-Old-Task' },
+          sessionHeader: false,
+        },
+      },
+      section: section({
+        identities: [identity({ team: 'new-team' })],
+        headerNames: { team: 'X-New-Team', agent: 'X-New-Agent', task: 'X-New-Task' },
+        sessionHeader: true,
+      }),
     })
-    expect(decision.reason).toBe('pinned')
     expect(decision.kind).toBe('attach')
+    expect(decision.reason).toBe('pinned')
+    expect(decision.headers).toEqual({
+      'X-Old-Team': 'old-team',
+      'X-Old-Agent': 'agent-a',
+      'X-Old-Task': 'task-a',
+      'X-Old': 'v1',
+    })
+    // Already snapshotted: the pin is authoritative and writes nothing.
+    expect(decision.pin).toBeUndefined()
+  })
+
+  it('still attaches a snapshot whose identity was deleted from the configuration', () => {
+    const decision = decide({
+      pin: {
+        ...pin({ identity: 'gone' }),
+        snapshot: { identity: identity({ id: 'gone' }), headerNames: defaultSection().headerNames, sessionHeader: true },
+      },
+      section: section({ identities: [identity({ id: 'other' })], defaultIdentity: 'other' }),
+    })
+    expect(decision.kind).toBe('attach')
+    expect(decision.headers['x-team-id']).toBe('team-a')
   })
 
   it('resolves the pinned identity case-insensitively and uses the current header names', () => {
@@ -254,12 +361,54 @@ describe('the pinned decision of a session', () => {
 
   it('keeps a pinned detachment detached, without re-pinning', () => {
     const decision = decide({ pin: pin({ identity: null, reason: 'model-detached' }) })
-    expect(decision).toEqual({ kind: 'detach', headers: {}, reason: 'pinned' })
+    expect(decision).toEqual({ kind: 'detach', headers: {}, reason: 'pinned', removeHeaders: ['x-team-id', 'x-agent-id', 'x-task-id', 'x-deepseek-harness-session-id'] })
+  })
+
+  it('never deletes a transport header, even when the config names one', () => {
+    // Validation refuses such a config, but the composition base only warns,
+    // so detach must be safe on its own: deleting `authorization` here would
+    // strip the caller's own credential.
+    const decision = decide({
+      pick: 'off',
+      section: section({ headerNames: { team: 'authorization', agent: 'x-agent-id', task: 'x-task-id' } }),
+    })
+    const removed = (decision.removeHeaders ?? []).map(name => name.toLowerCase())
+    expect(removed).not.toContain('authorization')
+    expect(removed).toContain('x-agent-id')
+  })
+
+  it('removes the session header even when this plugin never set it', () => {
+    // Deliberate: the harness itself adds `x-deepseek-harness-session-id` on
+    // Anthropic-shaped requests, so a detach that left it in place could let
+    // the proxy still attribute the call to a session. Detach is the one path
+    // where "carry no memory identity" wins over leaving foreign headers alone.
+    const off = section({ sessionHeader: false })
+    expect(decide({ pick: 'off', section: off }).removeHeaders).toContain('x-deepseek-harness-session-id')
+    // …while an attach with the switch off does not add that header.
+    expect(decide({ pick: 'default', section: off }).headers).not.toHaveProperty('x-deepseek-harness-session-id')
+  })
+
+  it('keeps deleting the header names a detached session pinned before a rename', () => {
+    // The pin remembers the names it detached under, so renaming the config
+    // cannot leave the old names (and their stale values) behind.
+    const decision = decide({
+      pin: pin({
+        identity: null,
+        reason: 'model-detached',
+        removeHeaderNames: { team: 'X-Old-Team', agent: 'X-Old-Agent', task: 'X-Old-Task' },
+      }),
+      section: section({ headerNames: { team: 'X-New-Team', agent: 'X-New-Agent', task: 'X-New-Task' } }),
+    })
+    expect(decision.removeHeaders).toEqual([
+      'X-Old-Team', 'X-Old-Agent', 'X-Old-Task',
+      'X-New-Team', 'X-New-Agent', 'X-New-Task',
+      'x-deepseek-harness-session-id',
+    ])
   })
 
   it('keeps a session detached when the pinned identity was deleted', () => {
     const decision = decide({ pin: pin({ identity: 'deleted' }), pick: 'default' })
-    expect(decision).toEqual({ kind: 'detach', headers: {}, reason: 'pinned-identity-missing' })
+    expect(decision).toEqual({ kind: 'detach', headers: {}, reason: 'pinned-identity-missing', removeHeaders: ['x-team-id', 'x-agent-id', 'x-task-id', 'x-deepseek-harness-session-id'] })
   })
 
   it('lets a pin override a model that names another existing identity', () => {
@@ -291,12 +440,8 @@ describe('auxiliary (non-pinnable) calls', () => {
     expect(decision.pin).toBeUndefined()
   })
 
-  it('does not pin a budget detachment or a missing identity either', () => {
+  it('does not pin a missing identity either', () => {
     for (const input of [
-      {
-        request: request({ pinnable: false, estimatedTokens: 500 }),
-        section: section({ budget: { enabled: true, maxRequestTokens: 1 } }),
-      },
       { request: request({ pinnable: false }), section: section({ defaultIdentity: '' }) },
       { request: request({ pinnable: false }), pick: { identity: 'deleted' } as const },
     ]) {
@@ -308,6 +453,8 @@ describe('auxiliary (non-pinnable) calls', () => {
     const decision = decide({ request: request({ pinnable: false }), pin: pin(), pick: 'off' })
     expect(decision.kind).toBe('attach')
     expect(decision.reason).toBe('pinned')
+    // An auxiliary call must never migrate a legacy pin: pins are the main
+    // request's to write.
     expect(decision.pin).toBeUndefined()
   })
 

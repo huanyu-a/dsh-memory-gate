@@ -39,7 +39,8 @@ test('drops the stale lockfile record for the file: dependency', () => {
   assert.match(source, /integrity/i, 'the reason for pruning (a stale integrity hash) should be documented')
   // Refusing to continue when nothing matched prevents a silent no-op that
   // would leave pnpm free to reuse the cached extraction.
-  assert.match(source, /cannot force a re-extract safely/, 'expected a hard failure when no lockfile record matches')
+  assert.match(source, /pruneMemoryGateLock/, 'expected preflighted lockfile transformation')
+  assert.ok(source.indexOf('prunedLock = pruneMemoryGateLock') < source.indexOf('profilePkg.dependencies ='), 'preflight must precede profile mutations')
 })
 
 test('verifies every installed file, not just the host entry', () => {
@@ -76,4 +77,23 @@ test('backs up both profile files before editing them', () => {
 test('refuses to edit anything that is not a DSH profile', () => {
   assert.match(source, /dsh\.profile\.bundles/, 'expected the bundle list to be validated')
   assert.match(source, /refusing to edit a non-DSH profile/, 'expected an explicit refusal')
+})
+
+test('translates /mnt paths for the Windows child it spawns', () => {
+  // The runtime's node.exe and pnpm are Windows binaries. Handed "/mnt/c/..."
+  // they resolve it against the current drive and the module is not found —
+  // measured as: Error: Cannot find module '\\wsl.localhost\Ubuntu\mnt\c\...'.
+  assert.match(source, /function forWindows\(value\)/)
+  assert.match(source, /\^\\\/mnt\\\/\(\[a-zA-Z\]\)/)
+  // Both the pnpm entry point and the install cwd go through it.
+  assert.match(source, /forWindows\(pnpmCjs\)/)
+  assert.match(source, /cwd: forWindows\(profile\)/)
+})
+
+test('finds the runtime from WSL, where LOCALAPPDATA is not set', () => {
+  // Running under WSL collapsed every runtime root to a relative path, so the
+  // installer reported "cannot find the DSH runtime's bundled pnpm" even though
+  // the runtime was installed.
+  assert.match(source, /const windowsLocalAppData =/)
+  assert.match(source, /\/mnt\/c\/Users\//)
 })

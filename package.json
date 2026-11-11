@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory-gate",
   "version": "0.1.0",
-  "description": "Per-model, per-session memory gate for DeepSeek Harness: decide which model calls carry the TDAI memory proxy's identity headers (x-team-id / x-agent-id / x-task-id), pin the decision for the life of a session, and detach memory once a conversation exceeds its token budget.",
+  "description": "Per-model, per-session memory gate for DeepSeek Harness: decide which model calls carry the TDAI memory proxy's identity headers (x-team-id / x-agent-id / x-task-id), and pin the decision for the life of a session.",
   "icon": "./icon.svg",
   "license": "MIT",
   "author": "WIN11",
@@ -60,7 +60,10 @@
     "prepare": "npm run build",
     "test:scripts": "node --test scripts/*.test.mjs",
     "pack:check": "node scripts/package-artifact.mjs",
-    "install:profile": "node scripts/install-profile.mjs"
+    "install:profile": "node scripts/install-profile.mjs",
+    "rollback:profile": "node scripts/rollback-profile.mjs",
+    "pins": "node scripts/session-pins.mjs",
+    "verify:install": "node scripts/verify-install.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24"

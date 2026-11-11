@@ -1,8 +1,7 @@
 /**
  * Host-half behavior over a minimal fake Cordis context: listener
  * registration, header stamping on `llm-pi-ai/request-headers`, the
- * `llm/stream` observation that feeds the budget gate, per-session pinning,
- * fail-open behavior, write-time config validation and the 0.1.5 legacy
+ * per-session pinning, fail-open behavior, write-time config validation and the 0.1.5 legacy
  * settings namespace.
  *
  * The fake is deliberately small and explicit: the plugin only touches
@@ -10,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
@@ -129,23 +128,12 @@ function makeHarness(options: {
 /** Drive `llm-pi-ai/request-headers` with a fresh Headers object. */
 function requestHeaders(
   harness: Harness,
-  context: { provider?: string; model?: string; baseURL?: string; sessionId?: string },
+  context: { provider?: string; model?: string; baseURL?: string; sessionId?: string; purpose?: string },
   headers = new Headers({ 'x-existing': 'kept' }),
 ): { headers: Headers; next: Mock; result: unknown } {
   const next = vi.fn(() => headers)
   const result = harness.emit('llm-pi-ai/request-headers', context, headers, next)
   return { headers, next, result }
-}
-
-/** Drive `llm/stream` and return the value the listener passed through. */
-function observeStream(
-  harness: Harness,
-  options: Record<string, unknown>,
-): { next: Mock; returned: unknown; chunks: { kind: string } } {
-  const chunks = { kind: 'chunks' }
-  const next = vi.fn(() => chunks)
-  const returned = harness.emit('llm/stream', options, next)
-  return { next, returned, chunks }
 }
 
 /** Harnesses created during one test, disposed in afterEach. */
@@ -176,12 +164,22 @@ describe('plugin registration', () => {
     expect(PluginConfig).toBeDefined()
   })
 
-  it('registers both request seams and the config validator exactly once', () => {
-    const harness = makeHarness()
-    expect([...harness.listeners.keys()].sort()).toEqual(['internal/config', 'llm-pi-ai/request-headers', 'llm/stream'])
-    for (const name of ['llm/stream', 'llm-pi-ai/request-headers', 'internal/config']) {
+  it('registers the header and config hooks but no llm/stream hook', () => {
+    const harness = makeHarness({ config: baseConfig() })
+    expect([...harness.listeners.keys()].sort()).toEqual(['internal/config', 'llm-pi-ai/request-headers'])
+    expect(harness.listeners.has('llm/stream')).toBe(false)
+    for (const name of ['llm-pi-ai/request-headers', 'internal/config']) {
       expect(harness.listeners.get(name)).toHaveLength(1)
     }
+    const { headers, next } = requestHeaders(harness, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-1' })
+    expect(Object.fromEntries(headers)).toEqual({
+      'x-existing': 'kept',
+      'x-team-id': 'team-a',
+      'x-agent-id': 'agent-a',
+      'x-task-id': 'task-a',
+      'x-deepseek-harness-session-id': 'session-1',
+    })
+    expect(next).toHaveBeenCalledTimes(1)
   })
 
   it('asks the 0.1.7 settings service to keep the browser-supplied card (auto: false)', () => {
@@ -217,6 +215,72 @@ describe('llm-pi-ai/request-headers', () => {
     expect(headers.get('x-deepseek-harness-session-id')).toBe('session-1')
     expect(headers.get('x-existing')).toBe('kept')
     expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['off', 'pinned null'])('removes preexisting core headers on %s but retains arbitrary extras', (mode) => {
+    const names = { team: 'x-custom-team', agent: 'x-custom-agent', task: 'x-custom-task' }
+    const harness = makeHarness({
+      config: baseConfig({ headerNames: names, sessionHeader: false,
+        identities: [identity({ headers: [{ name: 'x-extra', value: 'configured' }] })] }),
+    })
+    harness.setPiOverride(piDocument([{ id: 'm1', memoryGate: 'off' }]))
+    if (mode === 'pinned null') {
+      requestHeaders(harness, { provider: 'magpie', model: 'm1', sessionId: 'detached' })
+      harness.setPiOverride(piDocument([{ id: 'm1', memoryGate: 'default' }]))
+    }
+    const initial = new Headers({
+      'x-custom-team': 'stale-team', 'x-custom-agent': 'stale-agent', 'x-custom-task': 'stale-task',
+      'x-deepseek-harness-session-id': 'stale-session', 'x-extra': 'original', 'x-existing': 'kept',
+    })
+    const { headers, next } = requestHeaders(harness,
+      { provider: 'magpie', model: 'm1', sessionId: 'detached' }, initial)
+    expect(Object.fromEntries(headers)).toEqual({ 'x-existing': 'kept', 'x-extra': 'original' })
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps cleaning the header names a detached session pinned before a rename', () => {
+    // Pin a detach under one set of names, rename the configuration, then make
+    // a request: the stale names must still be deleted, not just the new ones.
+    const oldNames = { team: 'x-old-team', agent: 'x-old-agent', task: 'x-old-task' }
+    const before = makeHarness({ config: baseConfig({ headerNames: oldNames, sessionHeader: false }) })
+    before.setPiOverride(piDocument([{ id: 'm1', memoryGate: 'off' }]))
+    requestHeaders(before, { provider: 'magpie', model: 'm1', sessionId: 'renamed' })
+    before.dispose()
+
+    const after = makeHarness({ config: baseConfig({ headerNames: { team: 'x-new-team', agent: 'x-new-agent', task: 'x-new-task' }, sessionHeader: false }) })
+    // The route must still resolve to the trusted chain, or the request is skipped.
+    after.setPiOverride(piDocument([{ id: 'm1', memoryGate: 'default' }]))
+    const initial = new Headers({
+      'x-old-team': 'stale-team', 'x-old-agent': 'stale-agent', 'x-old-task': 'stale-task',
+      'x-new-team': 'never-set', 'x-existing': 'kept',
+    })
+    const { headers } = requestHeaders(after, { provider: 'magpie', model: 'm1', sessionId: 'renamed' }, initial)
+    expect(Object.fromEntries(headers)).toEqual({ 'x-existing': 'kept' })
+  })
+
+  it('leaves all preexisting memory headers unchanged on an untrusted chain-shaped route', () => {
+    const harness = makeHarness({ config: baseConfig() })
+    harness.setPiOverride(piDocument([{ id: 'm1', memoryGate: 'off' }], 'https://untrusted.example/dsh/default'))
+    const initial = new Headers({
+      'x-team-id': 'original-team', 'x-agent-id': 'original-agent', 'x-task-id': 'original-task',
+      'x-deepseek-harness-session-id': 'original-session', 'x-extra': 'original-extra',
+    })
+    const before = Object.fromEntries(initial)
+    const { headers, next } = requestHeaders(harness,
+      { provider: 'magpie', model: 'm1', sessionId: 's' }, initial)
+    expect(Object.fromEntries(headers)).toEqual(before)
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('attaches on a trusted custom origin read from a live configuration cell', () => {
+    const harness = makeHarness({ config: baseConfig({
+      trustedOrigins: { get: () => ['https://memory.example:8443'] },
+    }) })
+    const { headers } = requestHeaders(harness, {
+      provider: 'magpie', model: 'm1', baseURL: 'https://memory.example:8443/dsh/custom', sessionId: 'custom',
+    })
+    expect(headers.get('x-team-id')).toBe('team-a')
+    expect(headers.get('x-deepseek-harness-session-id')).toBe('custom')
   })
 
   it('honours the sessionHeader switch', () => {
@@ -266,37 +330,6 @@ describe('llm-pi-ai/request-headers', () => {
     const fresh = requestHeaders(harness, { provider: 'magpie', model: 'm1', sessionId: 'session-detached' })
     expect(fresh.headers.get('x-team-id')).toBeNull()
     expect(fresh.headers.get('x-deepseek-harness-session-id')).toBeNull()
-  })
-
-  it('feeds llm/stream observations into the budget gate', () => {
-    const harness = makeHarness({
-      config: baseConfig({ budget: { enabled: true, maxRequestTokens: 5 } }),
-    })
-    // 10 latin characters ≈ ceil(10/4) = 3 tokens, plus 8 per message = 11 > 5.
-    const observed = observeStream(harness, {
-      provider: 'magpie',
-      model: 'm1',
-      sessionId: 'session-big',
-      messages: [{ role: 'user', content: '0123456789' }],
-    })
-    expect(observed.returned).toBe(observed.chunks)
-    expect(observed.next).toHaveBeenCalledTimes(1)
-
-    const detached = requestHeaders(harness, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-big' })
-    expect(detached.headers.get('x-team-id')).toBeNull()
-
-    // A session with no observed request has no estimate, so it attaches.
-    const attached = requestHeaders(harness, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-small' })
-    expect(attached.headers.get('x-team-id')).toBe('team-a')
-  })
-
-  it('passes llm/stream through even when the request shape is unusable', () => {
-    const harness = makeHarness({ config: baseConfig() })
-    const next = vi.fn(() => 'chunks')
-    expect(harness.emit('llm/stream', {}, next)).toBe('chunks')
-    expect(harness.emit('llm/stream', { sessionId: 42, messages: 'nope' }, next)).toBe('chunks')
-    expect(next).toHaveBeenCalledTimes(2)
-    expect(console.warn).not.toHaveBeenCalled()
   })
 
   it('drops only the malformed header row and keeps the identity triple', () => {
@@ -397,7 +430,6 @@ describe('llm-pi-ai/request-headers', () => {
       model: 'm1',
       session: 'session-1',
       identity: 'main',
-      tokens: null,
       chain: CHAIN,
     })
     expect(JSON.parse(lines[1] as string)).toMatchObject({ kind: 'attach', reason: 'pinned' })
@@ -407,6 +439,32 @@ describe('llm-pi-ai/request-headers', () => {
     expect(console.info).toHaveBeenCalledTimes(1)
     expect((console.info as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[0])
       .toMatch(/attach identity="main" magpie\/m1 session=session-1/)
+  })
+
+  it('still calls next() when the diagnostics themselves throw', () => {
+    // The gate promises "a broken gate means no identity headers, never a
+    // broken model call". A bare console.warn in the catch block breaks that:
+    // with the host's stdio gone (EPIPE on a closed pipe) the write throws, the
+    // exception escapes the listener and `return next()` never runs.
+    const harness = makeHarness({ config: baseConfig() })
+    // A value Fetch refuses makes the stamping path warn; the throw then lands
+    // where a real EPIPE would.
+    const broken = identity({ headers: [{ name: 'x-bad', value: 'v\u0100' }] })
+    const harness2 = makeHarness({ config: { identities: [broken], defaultIdentity: 'main' } })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {
+      throw new Error('EPIPE: broken pipe, write')
+    })
+    try {
+      for (const h of [harness, harness2]) {
+        const next = vi.fn(() => new Headers())
+        expect(() => h.emit('llm-pi-ai/request-headers',
+          { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-1' },
+          new Headers(), next)).not.toThrow()
+        expect(next).toHaveBeenCalledTimes(1)
+      }
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('persists the pin to sessions.json when the plugin disposes', () => {
@@ -423,7 +481,85 @@ describe('llm-pi-ai/request-headers', () => {
       reason: 'attached',
       provider: 'magpie',
       model: 'm1',
+      // The persisted decision carries its own attachment values.
+      snapshot: {
+        identity: { id: 'main', team: 'team-a' },
+        headerNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
+        sessionHeader: true,
+      },
     })
+  })
+
+  it('keeps a live session on its pinned values after the identity is edited', () => {
+    // End-to-end through real Headers + the on-disk store: the pin survives a
+    // host restart and still reproduces the values it was created with.
+    const first = makeHarness({ config: baseConfig() })
+    const headers = requestHeaders(first, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-live' })
+    expect(headers.headers.get('x-team-id')).toBe('team-a')
+    first.dispose()
+
+    const edited = makeHarness({ config: baseConfig({ identities: [identity({ team: 'team-edited' })] }) })
+    const again = requestHeaders(edited, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-live' })
+    expect(again.headers.get('x-team-id')).toBe('team-a')
+
+    // A new session takes the edited value.
+    const fresh = requestHeaders(edited, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-new' })
+    expect(fresh.headers.get('x-team-id')).toBe('team-edited')
+  })
+
+  it('persists a legacy pin migration and never migrates from an auxiliary call', () => {
+    // Seed the on-disk legacy shape (id only), then let a main request migrate
+    // it and an auxiliary call reuse it. Only the main request may write.
+    const file = join(home, 'storage', 'memory-gate', 'sessions.json')
+    mkdirSync(join(home, 'storage', 'memory-gate'), { recursive: true })
+    const legacy = { identity: 'main', reason: 'attached', at: 5, provider: 'magpie', model: 'm1' }
+    writeFileSync(file, JSON.stringify({ version: 1, sessions: { 'session-old': legacy } }))
+
+    const auxiliary = makeHarness({ config: baseConfig() })
+    requestHeaders(auxiliary, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-old', purpose: 'title' })
+    auxiliary.dispose()
+    expect(JSON.parse(readFileSync(file, 'utf8')).sessions['session-old']).toEqual(legacy)
+
+    const main = makeHarness({ config: baseConfig() })
+    const attached = requestHeaders(main, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-old' })
+    expect(attached.headers.get('x-team-id')).toBe('team-a')
+    main.dispose()
+
+    const migrated = JSON.parse(readFileSync(file, 'utf8')).sessions['session-old']
+    expect(migrated).toMatchObject({
+      identity: 'main',
+      at: 5,
+      snapshot: { identity: { team: 'team-a' }, headerNames: { team: 'x-team-id' }, sessionHeader: true },
+    })
+    expect(typeof migrated.migratedAt).toBe('number')
+  })
+
+  it('never freezes an invalid composition-base value onto a session', () => {
+    // A bad extra header must stay repairable: the request attaches, the pin
+    // stays legacy, and once the config is fixed the session picks it up.
+    const broken = makeHarness({ config: baseConfig({ identities: [identity({ headers: [{ name: 'bad name', value: 'v' }] })] }) })
+    requestHeaders(broken, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-bad' })
+    broken.dispose()
+    const stored = JSON.parse(readFileSync(join(home, 'storage', 'memory-gate', 'sessions.json'), 'utf8'))
+    expect(stored.sessions['session-bad'].snapshot).toBeUndefined()
+
+    const repaired = makeHarness({ config: baseConfig({ identities: [identity({ headers: [{ name: 'X-Good', value: 'v' }] })] }) })
+    const headers = requestHeaders(repaired, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 'session-bad' })
+    expect(headers.headers.get('X-Good')).toBe('v')
+  })
+  it('warns once at startup when the composition base is unusable, and still fails open', () => {
+    // The base never passes the settings `validate` hook, so without this the
+    // operator sees only the symptom (no identity headers).
+    const harness = makeHarness({ config: baseConfig({ identities: [identity({ team: ' ' })] }) })
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('composition base is invalid'))
+    const { headers, next } = requestHeaders(harness, { provider: 'magpie', model: 'm1', baseURL: CHAIN, sessionId: 's' })
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(headers.get('x-team-id')).toBeNull()
+  })
+
+  it('says nothing at startup when the composition base is valid', () => {
+    makeHarness({ config: baseConfig() })
+    expect(console.warn).not.toHaveBeenCalled()
   })
 })
 
@@ -441,6 +577,20 @@ describe('internal/config validation', () => {
     expect(() => listener.call(FIBER, invalid, next))
       .toThrow(/duplicates the id "MAIN"/)
     expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a section whose extra row claims the session header', () => {
+    // The write path must reject it too, not just the identity validator:
+    // otherwise the row would reach the pin and freeze the conversation key.
+    const reserved = {
+      identities: [identity({ headers: [{ name: 'x-deepseek-harness-session-id', value: 'one' }] })],
+      defaultIdentity: 'main',
+    }
+    const harness = makeHarness()
+    const next = vi.fn(() => reserved)
+    const listener = harness.listenerOf('internal/config') as unknown as (this: unknown, raw: unknown, next: () => unknown) => unknown
+    expect(() => listener.call(FIBER, reserved, next))
+      .toThrow(/carries the session id/)
   })
 
   it('refuses an invalid section when cordis 4.1 passes the fiber as the first argument', () => {
@@ -495,8 +645,8 @@ describe('DSH 0.1.5 legacy settings namespace', () => {
       identities: [identity({ id: 'legacy', team: 'team-legacy', agent: 'agent-legacy', task: '' })],
       defaultIdentity: 'legacy',
       headerNames: { team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' },
-      budget: { enabled: false, maxRequestTokens: 120_000 },
       sessionHeader: false,
+      trustedOrigins: ['http://127.0.0.1:8096'],
     }))
     hooks.onChange()
 
@@ -539,8 +689,8 @@ describe('Config schema under the real schemastery', () => {
     expect(valueOf(resolved.identities as IdentityProfile[] | { get(): IdentityProfile[] })).toEqual([])
     expect(valueOf(resolved.defaultIdentity as string | { get(): string })).toBe('')
     expect(resolved.headerNames).toEqual({ team: 'x-team-id', agent: 'x-agent-id', task: 'x-task-id' })
-    expect(resolved.budget).toEqual({ enabled: false, maxRequestTokens: 120_000 })
     expect(valueOf(resolved.sessionHeader as boolean | { get(): boolean })).toBe(true)
+    expect(valueOf(resolved.trustedOrigins as string[] | { get(): string[] })).toEqual(['http://127.0.0.1:8096'])
   })
 
   it('keeps a configured identity intact', () => {
@@ -552,9 +702,8 @@ describe('Config schema under the real schemastery', () => {
   })
 
   it('resolves a partial config without dropping sibling defaults', () => {
-    const [resolved] = Schema.resolve({ sessionHeader: false, budget: { enabled: true, maxRequestTokens: 5_000 } }, PluginConfig, {})
+    const [resolved] = Schema.resolve({ sessionHeader: false }, PluginConfig, {})
     expect(valueOf(resolved.sessionHeader as boolean | { get(): boolean })).toBe(false)
-    expect(resolved.budget).toEqual({ enabled: true, maxRequestTokens: 5_000 })
     expect(resolved.headerNames.team).toBe('x-team-id')
   })
 

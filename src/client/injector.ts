@@ -111,6 +111,8 @@ export interface ScanState {
   generation: number
   /** The last describe promise, folded so scans never stack reads. */
   describePromise: Promise<SettingsJoin> | undefined
+  /** Whether the "rows exist but nothing matched" diagnostic already fired. */
+  diagnosed?: boolean
 }
 
 export function createScanState(): ScanState {
@@ -242,6 +244,16 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       for (const [, entry] of state.mounted) entry.editor.unmount()
       state.mounted.clear()
     }
+    // Selector drift is otherwise silent: the picker never appears and nothing
+    // is logged. Say it once, and only when model rows really are on screen —
+    // an empty model list is a normal state, not a symptom.
+    if (state.diagnosed !== true) {
+      const rows = root.querySelectorAll('[class*="modelEntry"]').length
+      if (rows > 0) {
+        state.diagnosed = true
+        console.warn(`[memory-gate] ${String(rows)} model row(s) are on screen but no capacity control matched (labels: ${labels.capacity.join(' / ')}); the host DOM may have changed`)
+      }
+    }
     return
   }
   // Fold the describe request across scans (one wire read per wave). The
@@ -266,10 +278,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       })
 
     const found = new Map<HTMLElement, FoundModel>()
+    let matchedTriggers = 0
     for (const aria of labels.capacity) {
       const triggers = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
         .filter(button => (button.getAttribute('aria-label') ?? '').startsWith(aria))
       for (const trigger of triggers) {
+        matchedTriggers += 1
         const row = trigger.closest<HTMLElement>('[class*="modelEntry"]')
         if (row === null) continue
         // Collapsed rows render no disclosure: nothing to mount into, and
@@ -295,7 +309,14 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
 
     Array.from(found.values()).forEach((target, index) => {
       const resolved = routeOfCard(target.card, providers, labels)
-      if (resolved === undefined) return
+      if (resolved === undefined) {
+        // A reused disclosure may no longer identify a saved or staged route.
+        // Never leave its old route's writable picker attached.
+        const stale = state.mounted.get(target.container)
+        stale?.editor.unmount()
+        state.mounted.delete(target.container)
+        return
+      }
       const { route, staged: routeStaged } = resolved
       const models = modelsOf(providers, route)
       // Remember the saved identity of this DOM row. An input edit that turns

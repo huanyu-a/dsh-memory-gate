@@ -2,7 +2,7 @@
  * The gate decision: pure, synchronous, and the only place that answers
  * "does this request carry a memory identity?". Kept free of Cordis, of the
  * settings service and of the filesystem so the whole policy — session
- * pinning, the budget detachment, identity resolution — is unit-testable.
+ * pinning, the per-model gate, identity resolution — is unit-testable.
  *
  * ## Why a decision is pinned per session
  *
@@ -24,10 +24,14 @@ import {
   findIdentity,
   identityHeaders,
   isMemoryChain,
+  headerNamesIssue,
+  pinnedValuesIssue,
+  type HeaderNames,
   type IdentityProfile,
   type MemoryGateSection,
   type ModelPick,
 } from './identities.js'
+import { DSH_SESSION_HEADER, RESERVED_TRANSPORT_HEADERS } from './constants.js'
 
 /** What one request looks like to the gate. */
 export interface GateRequest {
@@ -46,8 +50,20 @@ export interface GateRequest {
    * their model is chosen by a different setting.
    */
   pinnable?: boolean
-  /** Coarse token estimate of this request, when a stream listener observed it. */
-  estimatedTokens: number | undefined
+}
+
+/**
+ * The immutable values a pinned attachment reproduces. Editing an identity
+ * (or its headers) must not change a session that already pinned it, so the
+ * decision stores the values themselves rather than only an identity id.
+ */
+export interface PinSnapshot {
+  /** The identity triple and extra rows as they were when the pin was made. */
+  identity: IdentityProfile
+  /** The configured identity header names at pin time. */
+  headerNames: HeaderNames
+  /** Whether the harness session header rode along at pin time. */
+  sessionHeader: boolean
 }
 
 /** One stored session decision. */
@@ -61,6 +77,20 @@ export interface SessionPin {
   /** The provider/model that took the decision (diagnostics only). */
   provider: string
   model: string
+  /** The immutable attachment values (absent on a legacy pin, or on a detach). */
+  snapshot?: PinSnapshot
+  /**
+   * The identity header names a detached session must keep deleting. Without
+   * them a rename would leave the old names in place, so a detach could never
+   * clean up after a previous attachment.
+   */
+  removeHeaderNames?: HeaderNames
+  /**
+   * Epoch milliseconds when a legacy id-only pin gained its snapshot. The
+   * snapshot can only reflect the configuration at migration time: the values
+   * the session originally used were never persisted.
+   */
+  migratedAt?: number
 }
 
 /** What the gate decided for one request. */
@@ -73,15 +103,16 @@ export interface GateDecision {
   kind: 'skip' | 'detach' | 'attach'
   /** The identity to apply (`attach` only). */
   identity?: IdentityProfile
-  /** The wire headers to add (never empty for `attach`). */
+  /** The wire headers to add. Empty only for an attach whose identity has no values. */
   headers: Record<string, string>
+  /** Core memory headers to delete before stamping (`detach` only). */
+  removeHeaders?: string[]
   /** Machine-readable reason (decision log / UI hints). */
   reason:
     | 'not-memory-chain'
     | 'model-detached'
     | 'no-default-identity'
     | 'identity-missing'
-    | 'budget-exceeded'
     | 'pinned'
     | 'pinned-identity-missing'
     | 'attached'
@@ -101,13 +132,6 @@ export interface GateInput {
   now: number
 }
 
-/** Whether the budget gate detaches this request. */
-function budgetExceeded(section: MemoryGateSection, request: GateRequest): boolean {
-  if (!section.budget.enabled) return false
-  if (request.estimatedTokens === undefined) return false
-  return request.estimatedTokens > section.budget.maxRequestTokens
-}
-
 /** The default identity id, if the section names one that actually exists. */
 function defaultIdentityId(section: MemoryGateSection): string | undefined {
   const id = section.defaultIdentity.trim()
@@ -122,14 +146,46 @@ function defaultIdentityId(section: MemoryGateSection): string | undefined {
  */
 function attachHeaders(
   identity: IdentityProfile,
-  section: MemoryGateSection,
+  names: HeaderNames,
+  sessionHeader: boolean,
   sessionId: string | undefined,
 ): Record<string, string> {
-  const headers = identityHeaders(identity, section.headerNames)
-  if (section.sessionHeader && sessionId !== undefined && sessionId.length > 0) {
-    headers['x-deepseek-harness-session-id'] = sessionId
+  const headers = identityHeaders(identity, names)
+  if (sessionHeader && sessionId !== undefined && sessionId.length > 0) {
+    headers[DSH_SESSION_HEADER] = sessionId
   }
   return headers
+}
+
+/** Identity ids compare the way {@link findIdentity} compares them. */
+function sameId(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
+}
+
+/**
+ * The header names to remember for later cleanup, or undefined when they are
+ * not usable. Persisting an unusable triple would be silently dropped again by
+ * the loader, so the check happens here, at the only place that writes it.
+ */
+function removalNamesOf(section: MemoryGateSection): HeaderNames | undefined {
+  return headerNamesIssue(section.headerNames) === undefined ? { ...section.headerNames } : undefined
+}
+
+/**
+ * The immutable values a fresh attachment pins: the resolved identity and
+ * current shaping, or undefined when those values could never have been saved.
+ * Freezing an invalid value would make one session's headers permanently wrong
+ * even after the configuration is repaired, so such a request attaches for
+ * now but writes no snapshot.
+ */
+function snapshotOf(identity: IdentityProfile, section: MemoryGateSection): PinSnapshot | undefined {
+  if (pinnedValuesIssue(identity, section.headerNames) !== undefined) return undefined
+  return {
+    // Deep-copy the extra rows: the pin must not alias the configuration object.
+    identity: { ...identity, headers: identity.headers.map(entry => ({ ...entry })) },
+    headerNames: { ...section.headerNames },
+    sessionHeader: section.sessionHeader,
+  }
 }
 
 /**
@@ -140,16 +196,38 @@ function attachHeaders(
  */
 export function decideGate(input: GateInput): GateDecision {
   const { request, section, pick, pin, now } = input
-  if (!isMemoryChain(request.baseURL)) {
+  if (!isMemoryChain(request.baseURL, section.trustedOrigins)) {
     return { kind: 'skip', headers: {}, reason: 'not-memory-chain' }
   }
 
   const detach = (reason: GateDecision['reason'], withPin: boolean): GateDecision => ({
     kind: 'detach',
     headers: {},
+    // Delete every name this plugin may have set: the names the session pinned
+    // (even after a rename) plus the current ones. Blank names are dropped —
+    // `headers.delete('')` would only produce a noisy warning.
+    // Transport headers are filtered out here as well as in validation: with
+    // `headerNames.team = 'authorization'` a detach would otherwise delete the
+    // caller's own credential. Validation refuses that config, but the
+    // composition base only warns, so this path must be safe on its own.
+    removeHeaders: [...new Set([
+      ...Object.values(pin?.removeHeaderNames ?? {}),
+      ...Object.values(section.headerNames),
+      DSH_SESSION_HEADER,
+    ])].filter(name => name.trim().length > 0
+      && !RESERVED_TRANSPORT_HEADERS.includes(name.toLowerCase())),
     reason,
     ...withPin && request.pinnable !== false && request.sessionId !== undefined
-      ? { pin: { identity: null, reason, at: now, provider: request.provider, model: request.model } }
+      ? {
+        pin: {
+          identity: null,
+          reason,
+          at: now,
+          provider: request.provider,
+          model: request.model,
+          ...removalNamesOf(section) === undefined ? {} : { removeHeaderNames: removalNamesOf(section)! },
+        },
+      }
       : {},
   })
 
@@ -157,17 +235,40 @@ export function decideGate(input: GateInput): GateDecision {
   // configuration change must not retire a live session's memory.
   if (pin !== undefined) {
     if (pin.identity === null) return detach('pinned', false)
+    // A snapshot reproduces the exact values the session pinned. Only a legacy
+    // id-only pin is resolved against the live configuration, and it is
+    // migrated (once) so later identity edits cannot retroactively change it.
+    // The id must agree with the pin: the loader enforces that too, but the
+    // gate does not trust a caller to have validated it.
+    const snapshot = pin.snapshot !== undefined && sameId(pin.snapshot.identity.id, pin.identity)
+      ? pin.snapshot
+      : undefined
+    if (snapshot !== undefined) {
+      return {
+        kind: 'attach',
+        identity: snapshot.identity,
+        headers: attachHeaders(snapshot.identity, snapshot.headerNames, snapshot.sessionHeader, request.sessionId),
+        reason: 'pinned',
+      }
+    }
     const pinned = findIdentity(section, pin.identity)
     if (pinned === undefined) return detach('pinned-identity-missing', false)
-    return { kind: 'attach', identity: pinned, headers: attachHeaders(pinned, section, request.sessionId), reason: 'pinned' }
+    // Migration is a storage repair of the existing decision, not a new one —
+    // but only a pinnable request may write pins at all. An invalid live value
+    // is left unmigrated so repairing the configuration still repairs the
+    // session. `at` keeps its original value; the store orders eviction by the
+    // later of `at`/`migratedAt`, so this migration is not the first victim.
+    const migrated = request.pinnable !== false ? snapshotOf(pinned, section) : undefined
+    return {
+      kind: 'attach',
+      identity: pinned,
+      headers: attachHeaders(pinned, section.headerNames, section.sessionHeader, request.sessionId),
+      reason: 'pinned',
+      ...migrated === undefined ? {} : { pin: { ...pin, snapshot: migrated, migratedAt: now } },
+    }
   }
 
   if (pick === 'off') return detach('model-detached', true)
-
-  // The first decision of a memory-chain session is the one that registers it;
-  // the budget gate may only run here, never later.
-  const exceedsBudget = budgetExceeded(section, request)
-  if (exceedsBudget) return detach('budget-exceeded', true)
 
   const wanted = pick === 'default' ? defaultIdentityId(section) : pick.identity
   if (wanted === undefined) {
@@ -176,13 +277,30 @@ export function decideGate(input: GateInput): GateDecision {
   const identity = findIdentity(section, wanted)
   if (identity === undefined) return detach('identity-missing', true)
 
+  // An invalid live value is not frozen: the session stays legacy-id-only and
+  // is migrated once the configuration is repaired.
+  const fresh = snapshotOf(identity, section)
+  const pinnable = request.pinnable !== false && request.sessionId !== undefined
   return {
     kind: 'attach',
     identity,
-    headers: attachHeaders(identity, section, request.sessionId),
+    headers: attachHeaders(identity, section.headerNames, section.sessionHeader, request.sessionId),
     reason: 'attached',
-    ...request.pinnable !== false && request.sessionId !== undefined
-      ? { pin: { identity: identity.id, reason: 'attached', at: now, provider: request.provider, model: request.model } }
+    ...pinnable
+      ? {
+        pin: {
+          identity: identity.id,
+          reason: 'attached',
+          at: now,
+          provider: request.provider,
+          model: request.model,
+          // Without a valid snapshot the pin is the legacy id-only shape.
+          ...fresh === undefined ? {} : { snapshot: fresh },
+          // Remember the names even when the values could not be frozen, so a
+          // later rename still cleans them up if this identity disappears.
+          ...removalNamesOf(section) === undefined ? {} : { removeHeaderNames: removalNamesOf(section)! },
+        },
+      }
       : {},
   }
 }
