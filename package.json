@@ -1,13 +1,13 @@
 {
   "name": "dsh-memory-gate",
   "version": "0.1.0",
-  "description": "Per-model, per-session memory gate for DeepSeek Harness: decide which model calls carry the TDAI memory proxy's identity headers (x-team-id / x-agent-id / x-task-id), and pin the decision for the life of a session.",
+  "description": "Per-model, per-session header gate for DeepSeek Harness pi-ai inference requests: stamps configurable headers on calls to trusted origins and pins each session's first decision. Ships configured for the TDAI memory proxy's identity headers (x-team-id / x-agent-id / x-task-id); header names, values and trusted origins are all configurable.",
   "icon": "./icon.svg",
   "license": "MIT",
-  "author": "WIN11",
+  "author": "huanyu-a",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/WIN11/dsh-memory-gate.git"
+    "url": "git+https://github.com/huanyu-a/dsh-memory-gate.git"
   },
   "keywords": [
     "deepseek-harness",

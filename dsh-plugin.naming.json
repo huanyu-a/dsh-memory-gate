@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "policy": "dsh-plugin-naming/v1",
   "plugin": {
-    "namespace": "WIN11",
+    "namespace": "huanyu-a",
     "name": "memory-gate",
-    "coordinate": "WIN11/memory-gate",
+    "coordinate": "huanyu-a/memory-gate",
     "packageName": "dsh-memory-gate"
   },
   "names": {
