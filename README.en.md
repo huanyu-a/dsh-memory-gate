@@ -14,6 +14,14 @@ Select named memory identities for DeepSeek Harness (DSH) pi-ai requests and ret
 
 **Detach clears core headers only.** On trusted origins it removes the three identity headers (the union of the names pinned at detach time and the current names) plus the DSH session header, not arbitrary extras or authentication headers. Other headers and later middleware can still identify the request; this is not a guarantee of no proxy side effects.
 
+### Generic mechanism vs TDAI defaults
+
+By implementation, the plugin is not TDAI-bound: the core mechanism **stamps configured headers on outbound model-inference requests** (the `llm-pi-ai/request-headers` waterfall), selected per model, restricted to trusted origins, pinning each session's first decision. Header names, values, and trusted origins are all configurable; the TDAI memory proxy is the founding use case and the shipped default, not a hard dependency.
+
+- **Generic mechanism**: the three `headerNames` slots accept any valid HTTP header name; each identity can carry arbitrary extra header rows; `trustedOrigins` accepts any HTTP(S) origin; the per-model gate and per-session pinning depend on no proxy protocol.
+- **TDAI-specific defaults only**: the default origin `http://127.0.0.1:8096`, the default header names `x-team-id` / `x-agent-id` / `x-task-id`, the conversation-key semantics of `x-deepseek-harness-session-id`, and the "identity / memory" wording.
+- **Generic use stays inside the existing boundaries**: outbound inference requests only — no other DSH requests are touched; detach clears the three core headers plus the session header and never arbitrary extras (see above); values are static configuration with no dynamic templating; configuration changes affect new sessions only (session pins freeze).
+
 ## Installation, upgrades, and rollback
 
 Step-by-step desktop-profile runbook (exit check, backup, post-install fingerprint, behaviour check, rollback): see the [deployment checklist](<DEPLOY.md>) (Chinese).
