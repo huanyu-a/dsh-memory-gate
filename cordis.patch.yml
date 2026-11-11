@@ -2,7 +2,7 @@
 # added to a profile. Mounts the host half (the `memory-gate` identities plus
 # the per-request identity-header gate) so the browser scanner discovers
 # `dsh.client` and serves `lib/client.js` as
-# `/plugins/dsh-memory-gate/client.js`.
+# `/plugins/dsh-memory-header-gate/client.js`.
 #
 # The row id is `memory-gate` — NOT the package name — because on DSH 0.1.7+
 # the row id doubles as the plugin's settings namespace (the key the settings
@@ -11,4 +11,4 @@
 # this plugin writes stays addressable even if the package is renamed.
 - insert:
     - id: memory-gate
-      name: dsh-memory-gate
+      name: dsh-memory-header-gate

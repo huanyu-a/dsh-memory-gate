@@ -7,7 +7,7 @@
  * plus one `onChange` per identity, so every keystroke is one whole-identity
  * replacement and the card's dirty/revision bookkeeping stays in one place.
  *
- * @module dsh-memory-gate/client/IdentityEditor
+ * @module dsh-memory-header-gate/client/IdentityEditor
  */
 
 import type { ReactNode } from 'react'

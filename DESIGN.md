@@ -41,7 +41,7 @@
 
 ## 2. 配置与兼容性
 
-[清单](<package.json>)定义包名 `dsh-memory-gate`、host/client 出口、Web client 与[组合补丁](<cordis.patch.yml>)。补丁行 ID / settings namespace 为 `memory-gate`；模型配置在 `llm-pi-ai` 的 provider/model 行 `memoryGate` 字段。
+[清单](<package.json>)定义包名 `dsh-memory-header-gate`、host/client 出口、Web client 与[组合补丁](<cordis.patch.yml>)。补丁行 ID / settings namespace 为 `memory-gate`；模型配置在 `llm-pi-ai` 的 provider/model 行 `memoryGate` 字段。
 
 [配置解析](<src/identities.ts>)提供默认值、宽松 normalize 和写时校验。ID 比较去空白且大小写不敏感；模型 `off/default` 保留值同样大小写不敏感，其他字符串为身份 ID，空值/非字符串回退 default。保存时拒绝保留值作为身份 ID。
 

@@ -8,7 +8,7 @@
  * every answer is the envelope `{ok, value | error}` with refusals coded
  * `settings/conflict` / `settings/rejected` / `gateway/*`.
  *
- * @module dsh-memory-gate/client/types
+ * @module dsh-memory-header-gate/client/types
  */
 
 import type { SettingsDescribeValue, SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-settings/types'

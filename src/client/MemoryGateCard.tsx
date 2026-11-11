@@ -10,7 +10,7 @@
  * all five fields ride together — so a default identity can never point at an
  * identity the same save removed.
  *
- * @module dsh-memory-gate/client/MemoryGateCard
+ * @module dsh-memory-header-gate/client/MemoryGateCard
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -209,7 +209,7 @@ export function MemoryGateCard(props: MemoryGateCardProps): ReactNode {
         await reload.current()
       } else {
         setFailed(reply.error)
-        console.error(`[dsh-memory-gate] section save failed: ${reply.error}`)
+        console.error(`[dsh-memory-header-gate] section save failed: ${reply.error}`)
       }
     } catch (error) {
       if (mounted.current && owner === lifecycle.current) {

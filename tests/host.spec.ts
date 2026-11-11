@@ -159,7 +159,7 @@ afterEach(() => {
 
 describe('plugin registration', () => {
   it('declares the settings dependency and the stable package name', () => {
-    expect(pluginName).toBe('dsh-memory-gate')
+    expect(pluginName).toBe('dsh-memory-header-gate')
     expect(pluginInject).toEqual(['settings'])
     expect(PluginConfig).toBeDefined()
   })

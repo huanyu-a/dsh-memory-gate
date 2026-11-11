@@ -36,10 +36,10 @@ Run from the repository root; replace the example profile/version as needed:
 npm ci --legacy-peer-deps=false
 npm run build
 npm pack --ignore-scripts
-dsh plugin --profile my-profile add ./dsh-memory-gate-0.1.0.tgz
+dsh plugin --profile my-profile add ./dsh-memory-header-gate-0.1.0.tgz
 ```
 
-The bundled [composition patch](<cordis.patch.yml>) registers the `memory-gate` row under package name `dsh-memory-gate`. The host loads both halves. Avoid `link:` dependencies in a real profile: they may resolve development dependency copies. Upgrade through the profile's existing package-management mechanism and confirm it consumes the fresh tarball rather than a cached extraction.
+The bundled [composition patch](<cordis.patch.yml>) registers the `memory-gate` row under package name `dsh-memory-header-gate`. The host loads both halves. Avoid `link:` dependencies in a real profile: they may resolve development dependency copies. Upgrade through the profile's existing package-management mechanism and confirm it consumes the fresh tarball rather than a cached extraction.
 
 ### Desktop profile caveats
 
@@ -66,7 +66,7 @@ After failure, keep DSH closed. Restore the manifest, lockfile, and old tarball 
 
 ## Configuration
 
-On a supported Web host, open **Plugins → dsh-memory-gate → Memory gate**. The legacy branch uses **Settings → Plugins → Plugin configuration**. This describes the UI implemented in source, **not browser-rendered acceptance verified in this documentation task**.
+On a supported Web host, open **Plugins → dsh-memory-header-gate → Memory gate**. The legacy branch uses **Settings → Plugins → Plugin configuration**. This describes the UI implemented in source, **not browser-rendered acceptance verified in this documentation task**.
 
 | Field | Default | Purpose |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ This is a composition-layer plugin-row example, not a replacement for an entire 
 
 ```yaml
 - id: memory-gate
-  name: dsh-memory-gate
+  name: dsh-memory-header-gate
   config:
     identities:
       - id: example-worker

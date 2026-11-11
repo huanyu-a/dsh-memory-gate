@@ -12,7 +12,7 @@
 已装的是旧构建（无 `trustedOrigins` / `removeHeaderNames` / `migratedAt`）。装完后这三样都应该出现：
 
 ```powershell
-$p = "C:\Users\WIN11\.dsh\profiles\desktop\node_modules\dsh-memory-gate\lib\index.js"
+$p = "C:\Users\WIN11\.dsh\profiles\desktop\node_modules\dsh-memory-header-gate\lib\index.js"
 (Select-String -Path $p -Pattern 'trustedOrigins','removeHeaderNames','migratedAt' -SimpleMatch | Measure-Object).Count
 ```
 
@@ -28,7 +28,7 @@ $p = "C:\Users\WIN11\.dsh\profiles\desktop\node_modules\dsh-memory-gate\lib\inde
 
 ## 1. 完全退出 DSH
 
-应用运行时会占用 `node_modules/dsh-memory-gate`，且退出时可能重写 profile 清单，装到一半会被覆盖。
+应用运行时会占用 `node_modules/dsh-memory-header-gate`，且退出时可能重写 profile 清单，装到一半会被覆盖。
 
 ```powershell
 Get-Process -Name "DeepSeek Harness" -ErrorAction SilentlyContinue | Select-Object Id,ProcessName
@@ -55,7 +55,7 @@ robocopy "C:\Users\WIN11\.dsh\profiles\desktop" "D:\backup\desktop-profile-$stam
 
 **不要用 `Copy-Item -Recurse`**：profile 里 `node_modules/@local/dsh-personal` 是 `link:` 依赖的符号链接，普通权限复制会失败并报 `EPERM: operation not permitted, symlink`（已实测）。`robocopy` 不会失败——它会把该链接**展开成实体目录**复制，所以备份里的 `dsh-personal` 是拍快照那一刻的副本，不指向实时目录。
 
-回滚脚本要求备份内**含已安装的插件目录**（`node_modules/dsh-memory-gate/package.json`），因此整树备份是必需的；只备份 manifest 与 lock 不足以回滚。
+回滚脚本要求备份内**含已安装的插件目录**（`node_modules/dsh-memory-header-gate/package.json`），因此整树备份是必需的；只备份 manifest 与 lock 不足以回滚。
 
 ## 3. 执行安装
 
@@ -67,7 +67,7 @@ node scripts/install-profile.mjs "C:\Users\WIN11\.dsh\profiles\desktop"         
 
 判据：脚本自行重建、打包、替换、按字节比对全部产物，并拒绝嵌套依赖。任何一步失败都会 `fail` 退出，**不要**在失败后启动应用。
 
-预演应打印：`profile`、`pnpm 11.28.5`、`replacing ...\node_modules\dsh-memory-gate`。
+预演应打印：`profile`、`pnpm 11.28.5`、`replacing ...\node_modules\dsh-memory-header-gate`。
 
 ## 4. 装后校验（启动前）
 
@@ -79,15 +79,15 @@ node scripts/verify-install.mjs "C:\Users\WIN11\.dsh\profiles\desktop"
 
 它逐项打印 PASS/FAIL：profile 结构、插件已装、清单依赖、bundle 注册、**host 与 client 两半都是新构建**、lockfile 记录、pin 文件可读。退出码 0 表示全部通过，1 表示有问题。
 
-pin 文件位置默认从 `src/store.ts` 推导；若在仓库外单独使用该脚本，可用 `--storage=<目录>` 直接指定（目录名是 `memory-gate`，**不是**包名 `dsh-memory-gate`，两者故意不同）。
+pin 文件位置默认从 `src/store.ts` 推导；若在仓库外单独使用该脚本，可用 `--storage=<目录>` 直接指定（目录名是 `memory-gate`，**不是**包名 `dsh-memory-header-gate`，两者故意不同）。
 
 注意 host/client 的判定不看版本号（升级前后同为 `0.1.0`），而是查新构建特有的标记；client 半边尤其如此——它的模块 wrapper 在两版里完全相同，只查 wrapper 会假通过。
 
 手工检查等价项：
 
 ```powershell
-Test-Path "C:\Users\WIN11\.dsh\profiles\desktop\node_modules\dsh-memory-gate\lib\index.js"   # True
-Test-Path "C:\Users\WIN11\.dsh\profiles\desktop\node_modules\dsh-memory-gate\lib\client.js"  # True
+Test-Path "C:\Users\WIN11\.dsh\profiles\desktop\node_modules\dsh-memory-header-gate\lib\index.js"   # True
+Test-Path "C:\Users\WIN11\.dsh\profiles\desktop\node_modules\dsh-memory-header-gate\lib\client.js"  # True
 ```
 
 ## 5. 启动并验证行为

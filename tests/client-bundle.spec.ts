@@ -101,7 +101,7 @@ describe('built browser bundle', () => {
 
   it('registers under the plugin id and exports the cordis client surface', async () => {
     const exports = await loadBundle()
-    expect(exports.name).toBe('dsh-memory-gate')
+    expect(exports.name).toBe('dsh-memory-header-gate')
     expect(exports.apply).toBeTypeOf('function')
     expect(exports.inject).toContain('slots')
     expect(exports.inject).toContain('remote.settings')
@@ -117,13 +117,13 @@ describe('built browser bundle', () => {
 
     const styles = Array.from(document.head.querySelectorAll('style'))
     expect(styles).toHaveLength(1)
-    expect(styles[0].dataset['pluginStyles']).toBe('dsh-memory-gate')
+    expect(styles[0].dataset['pluginStyles']).toBe('dsh-memory-header-gate')
     expect(styles[0].textContent?.length).toBeGreaterThan(100)
 
     // The dictionary registration lives inside an effect, so it appears only
     // once the shell runs them — and every effect must return a disposer.
     const disposers = effects.map(run => run())
-    expect(dictionaries.get('dsh-memory-gate')).toBeDefined()
+    expect(dictionaries.get('dsh-memory-header-gate')).toBeDefined()
     expect(disposers.every(d => typeof d === 'function')).toBe(true)
     for (const dispose of disposers) if (dispose !== undefined) dispose()
     expect(document.head.querySelectorAll('style')).toHaveLength(0)

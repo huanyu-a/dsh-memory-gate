@@ -90,7 +90,7 @@ await check('lockfile records the local tarball', () => {
 
 await check('pin store is readable', async () => {
   // The directory name is the plugin's cordis ROW id (`memory-gate`), which
-  // deliberately differs from the package name (`dsh-memory-gate`) — deriving
+  // deliberately differs from the package name (`dsh-memory-header-gate`) — deriving
   // it from the manifest would silently inspect a directory that never exists,
   // and "no pins yet" would then read as a pass.
   const home = process.env['DSH_HOME']?.trim()

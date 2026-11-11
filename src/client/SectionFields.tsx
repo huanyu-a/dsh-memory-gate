@@ -5,7 +5,7 @@
  * draft and passes a single `onPatch` for section-shape edits, so the dirty
  * flag, the revision baseline and the save path stay in one component.
  *
- * @module dsh-memory-gate/client/SectionFields
+ * @module dsh-memory-header-gate/client/SectionFields
  */
 
 import { useId } from 'react'

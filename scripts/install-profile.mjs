@@ -183,7 +183,7 @@ if (dryRun) {
 }
 
 // Preflight before changing the manifest, artifact or installed tree.
-// dsh-memory-gate@file: records carry a stale integrity hash after repacking.
+// dsh-memory-header-gate@file: records carry a stale integrity hash after repacking.
 const lockPath = join(profile, 'pnpm-lock.yaml')
 let prunedLock
 try {

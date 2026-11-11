@@ -1,5 +1,5 @@
 /**
- * Browser half of dsh-memory-gate.
+ * Browser half of dsh-memory-header-gate.
  *
  * Contributions, all of which dispose with the plugin fiber:
  *   1. The "记忆闸门" / "Memory gate" configuration card. Where it registers
@@ -20,7 +20,7 @@
  *      model catalog) equipped with the memory-identity picker.
  *   3. The stylesheet and copy dictionaries.
  *
- * @module dsh-memory-gate/client
+ * @module dsh-memory-header-gate/client
  */
 
 import type { ClientContext, RemoteApi, SlotRegistrarFace } from './types.js'
@@ -81,7 +81,7 @@ class MgBoundary extends Component<{ children?: ReactNode; fallback: string }, {
     return { error: error instanceof Error ? error.message : String(error) }
   }
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
-    console.error('[dsh-memory-gate] render failed:', error, info.componentStack)
+    console.error('[dsh-memory-header-gate] render failed:', error, info.componentStack)
   }
   override render(): ReactNode {
     if (this.state.error !== null) {
@@ -110,13 +110,13 @@ function panelRoot(): HTMLElement {
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(STORE_NS, { zh, en }), 'dsh-memory-gate: dictionaries')
+  ctx.effect(() => ctx.locale.register(STORE_NS, { zh, en }), 'dsh-memory-header-gate: dictionaries')
 
   const style = document.createElement('style')
   style.dataset['pluginStyles'] = PLUGIN_ID
   style.textContent = STYLES
   document.head.appendChild(style)
-  ctx.effect(() => () => style.remove(), 'dsh-memory-gate: stylesheet')
+  ctx.effect(() => () => style.remove(), 'dsh-memory-header-gate: stylesheet')
 
   const settingsApi: RemoteApi = { settings: ctx.remote.settings }
   const t = ctx.locale.bind(STORE_NS)
@@ -194,7 +194,7 @@ export function apply(ctx: ClientContext): void {
         locale: STORE_NS,
         inject: cardInject,
       }, MemoryGateCard))
-  }, 'dsh-memory-gate: bundle configuration card')
+  }, 'dsh-memory-header-gate: bundle configuration card')
 
   // DSH 0.1.5: the sanctioned `settings.plugin.item` slot is keyed by
   // settings namespace; the host half registers `memory-gate`, this card
@@ -255,7 +255,7 @@ export function apply(ctx: ClientContext): void {
       disposeCard?.()
       disposeCard = undefined
     }
-  }, 'dsh-memory-gate: plugin-configuration card')
+  }, 'dsh-memory-header-gate: plugin-configuration card')
 
   // ---- DOM bypass injection (Models page per-model picker) ----
   /** Debounce window for DOM-mutation scans (one scan per render burst). */
@@ -329,7 +329,7 @@ export function apply(ctx: ClientContext): void {
       for (const [, entry] of scanState.mounted) entry.editor.unmount()
       scanState.mounted.clear()
     }
-  }, 'dsh-memory-gate: DOM injector')
+  }, 'dsh-memory-header-gate: DOM injector')
 
   // Refresh the injection when the settings document changes (an apply from
   // either the official page or this plugin re-renders the rows; an identity
@@ -351,7 +351,7 @@ export function apply(ctx: ClientContext): void {
       }),
     ]
     return () => { for (const dispose of disposers) dispose() }
-  }, 'dsh-memory-gate: pushed invalidations')
+  }, 'dsh-memory-header-gate: pushed invalidations')
 }
 
 export type { MgKey }

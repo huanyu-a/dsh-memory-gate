@@ -14,7 +14,7 @@
  * are debounced off the request path, because a model call must never wait on
  * this plugin's disk.
  *
- * @module dsh-memory-gate/store
+ * @module dsh-memory-header-gate/store
  */
 
 import {

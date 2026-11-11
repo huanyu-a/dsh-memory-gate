@@ -24,7 +24,7 @@
  *   - if the official structure it depends on ever stops appearing, it simply
  *     stops injecting — the settings page remains untouched.
  *
- * @module dsh-memory-gate/client/injector
+ * @module dsh-memory-header-gate/client/injector
  */
 
 import { MEMORY_GATE_FIELD } from '../constants.js'

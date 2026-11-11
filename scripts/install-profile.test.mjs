@@ -34,7 +34,7 @@ test('always rebuilds and repacks instead of trusting an existing tarball', () =
 })
 
 test('drops the stale lockfile record for the file: dependency', () => {
-  assert.match(source, /dsh-memory-gate@file:/, 'the script must recognise the packages-section record it prunes')
+  assert.match(source, /dsh-memory-header-gate@file:/, 'the script must recognise the packages-section record it prunes')
   assert.match(source, /pnpm-lock\.yaml/, 'expected the lockfile to be rewritten')
   assert.match(source, /integrity/i, 'the reason for pruning (a stale integrity hash) should be documented')
   // Refusing to continue when nothing matched prevents a silent no-op that

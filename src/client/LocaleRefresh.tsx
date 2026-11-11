@@ -8,7 +8,7 @@
  * the locale revision and rebuilds its children thunk on every render (a
  * cached element would let React bail out of the subtree).
  *
- * @module dsh-memory-gate/client/LocaleRefresh
+ * @module dsh-memory-header-gate/client/LocaleRefresh
  */
 import { useCallback, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'

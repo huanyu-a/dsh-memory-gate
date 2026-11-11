@@ -15,22 +15,22 @@ const libDir = join(import.meta.dirname, '..', 'lib')
 function makeProfile({ hostMarkers = true, clientMarkers = true, bundle = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mg-verify-'))
   const profile = join(root, 'profile')
-  const installed = join(profile, 'node_modules', 'dsh-memory-gate')
+  const installed = join(profile, 'node_modules', 'dsh-memory-header-gate')
   mkdirSync(join(installed, 'lib'), { recursive: true })
   writeFileSync(join(profile, 'package.json'), JSON.stringify({
     name: 'desktop-profile',
-    dependencies: { 'dsh-memory-gate': 'file:dsh-memory-gate-0.1.0.tgz' },
-    dsh: { profile: { bundles: bundle ? ['dsh-memory-gate'] : [] } },
+    dependencies: { 'dsh-memory-header-gate': 'file:dsh-memory-header-gate-0.1.0.tgz' },
+    dsh: { profile: { bundles: bundle ? ['dsh-memory-header-gate'] : [] } },
   }))
-  writeFileSync(join(profile, 'pnpm-lock.yaml'), 'importers:\n  .:\n    dependencies:\n      "dsh-memory-gate@file:x": {}\n')
-  writeFileSync(join(installed, 'package.json'), JSON.stringify({ name: 'dsh-memory-gate', version: '0.1.0' }))
+  writeFileSync(join(profile, 'pnpm-lock.yaml'), 'importers:\n  .:\n    dependencies:\n      "dsh-memory-header-gate@file:x": {}\n')
+  writeFileSync(join(installed, 'package.json'), JSON.stringify({ name: 'dsh-memory-header-gate', version: '0.1.0' }))
   // The real artifacts, optionally stripped back to the old build's shape.
   const host = hostMarkers
     ? 'trustedOrigins removeHeaderNames migratedAt name-reserved name-conflict name-duplicate'
     : 'const a = 1;'
   const client = clientMarkers
-    ? 'window.__ModuleLoader__.load({id: "dsh-memory-gate"}) // issueHeaderNameReserved issueHeaderNameDuplicate issueNameConflict issueSaveBlockedByIdentity'
-    : 'window.__ModuleLoader__.load({id: "dsh-memory-gate"})'
+    ? 'window.__ModuleLoader__.load({id: "dsh-memory-header-gate"}) // issueHeaderNameReserved issueHeaderNameDuplicate issueNameConflict issueSaveBlockedByIdentity'
+    : 'window.__ModuleLoader__.load({id: "dsh-memory-header-gate"})'
   writeFileSync(join(installed, 'lib', 'index.js'), host)
   writeFileSync(join(installed, 'lib', 'client.js'), client)
   return { root, profile }

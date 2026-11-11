@@ -5,11 +5,11 @@
     "namespace": "huanyu-a",
     "name": "memory-gate",
     "coordinate": "huanyu-a/memory-gate",
-    "packageName": "dsh-memory-gate"
+    "packageName": "dsh-memory-header-gate"
   },
   "names": {
-    "pluginNames": ["dsh-memory-gate"],
-    "loaderIds": ["dsh-memory-gate"],
+    "pluginNames": ["dsh-memory-header-gate"],
+    "loaderIds": ["dsh-memory-header-gate"],
     "services": [],
     "tools": [],
     "commands": [],

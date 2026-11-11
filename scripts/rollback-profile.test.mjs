@@ -8,15 +8,15 @@ import { dshRunning, performRollback, rollbackProblems } from './rollback-profil
 /** Build a directory that looks like a restorable profile backup. */
 function makeBackup(overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mg-rollback-'))
-  mkdirSync(join(dir, 'node_modules', 'dsh-memory-gate', 'lib'), { recursive: true })
+  mkdirSync(join(dir, 'node_modules', 'dsh-memory-header-gate', 'lib'), { recursive: true })
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: 'desktop-profile',
-    dependencies: { 'dsh-memory-gate': 'file:dsh-memory-gate-0.1.0.tgz' },
-    dsh: { profile: { bundles: ['dsh-memory-gate'] } },
+    dependencies: { 'dsh-memory-header-gate': 'file:dsh-memory-header-gate-0.1.0.tgz' },
+    dsh: { profile: { bundles: ['dsh-memory-header-gate'] } },
   }))
   writeFileSync(join(dir, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n")
-  writeFileSync(join(dir, 'node_modules', 'dsh-memory-gate', 'package.json'), JSON.stringify({ name: 'dsh-memory-gate', version: '0.1.0' }))
-  writeFileSync(join(dir, 'node_modules', 'dsh-memory-gate', 'lib', 'index.js'), '// built\n')
+  writeFileSync(join(dir, 'node_modules', 'dsh-memory-header-gate', 'package.json'), JSON.stringify({ name: 'dsh-memory-header-gate', version: '0.1.0' }))
+  writeFileSync(join(dir, 'node_modules', 'dsh-memory-header-gate', 'lib', 'index.js'), '// built\n')
   for (const [path, body] of Object.entries(overrides)) writeFileSync(join(dir, path), body)
   return dir
 }
@@ -57,13 +57,13 @@ test('rejects a directory that is not a DSH profile', () => {
 test('rejects a profile whose bundle list omits the plugin', () => {
   const backup = makeBackup({
     'package.json': JSON.stringify({
-      dependencies: { 'dsh-memory-gate': 'file:x.tgz' },
+      dependencies: { 'dsh-memory-header-gate': 'file:x.tgz' },
       dsh: { profile: { bundles: ['something-else'] } },
     }),
   })
   try {
     const problems = rollbackProblems(backup, join(backup, '..', 'p')).join('\n')
-    assert.match(problems, /does not list dsh-memory-gate/)
+    assert.match(problems, /does not list dsh-memory-header-gate/)
   } finally {
     rmSync(backup, { recursive: true, force: true })
   }
@@ -87,14 +87,14 @@ test('restores the backup and keeps the replaced profile aside', () => {
   const profile = join(backup, '..', `mg-profile-${Date.now()}`)
   try {
     // A marker that must not survive the restore.
-    mkdirSync(join(profile, 'node_modules', 'dsh-memory-gate', 'lib'), { recursive: true })
+    mkdirSync(join(profile, 'node_modules', 'dsh-memory-header-gate', 'lib'), { recursive: true })
     writeFileSync(join(profile, 'stale.txt'), 'stale')
-    writeFileSync(join(profile, 'node_modules', 'dsh-memory-gate', 'lib', 'index.js'), '// new\n')
+    writeFileSync(join(profile, 'node_modules', 'dsh-memory-header-gate', 'lib', 'index.js'), '// new\n')
 
     const moved = performRollback(backup, profile, 'test')
     assert.equal(moved, `${profile}.pre-rollback-test`)
     assert.equal(existsSync(join(profile, 'stale.txt')), false)
-    assert.equal(readFileSync(join(profile, 'node_modules', 'dsh-memory-gate', 'lib', 'index.js'), 'utf8'), '// built\n')
+    assert.equal(readFileSync(join(profile, 'node_modules', 'dsh-memory-header-gate', 'lib', 'index.js'), 'utf8'), '// built\n')
     // The replaced tree is preserved, not deleted.
     assert.equal(readFileSync(join(moved, 'stale.txt'), 'utf8'), 'stale')
   } finally {

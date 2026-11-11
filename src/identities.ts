@@ -7,7 +7,7 @@
  * No Cordis, no DOM, no Node APIs — every function here is unit-testable in
  * isolation and safe to import from the browser half.
  *
- * @module dsh-memory-gate/identities
+ * @module dsh-memory-header-gate/identities
  */
 
 import {

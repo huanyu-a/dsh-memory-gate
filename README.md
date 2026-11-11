@@ -36,10 +36,10 @@
 npm ci --legacy-peer-deps=false
 npm run build
 npm pack --ignore-scripts
-dsh plugin --profile my-profile add ./dsh-memory-gate-0.1.0.tgz
+dsh plugin --profile my-profile add ./dsh-memory-header-gate-0.1.0.tgz
 ```
 
-包内[组合补丁](<cordis.patch.yml>)注册 `memory-gate` 行，包名为 `dsh-memory-gate`。由宿主加载 host/client；不要把源码目录用 `link:` 接入真实 profile，以免解析到开发依赖副本。升级沿用该 profile 的包管理方式，并确认使用的是新 tarball，而不是旧缓存。
+包内[组合补丁](<cordis.patch.yml>)注册 `memory-gate` 行，包名为 `dsh-memory-header-gate`。由宿主加载 host/client；不要把源码目录用 `link:` 接入真实 profile，以免解析到开发依赖副本。升级沿用该 profile 的包管理方式，并确认使用的是新 tarball，而不是旧缓存。
 
 ### Desktop profile 注意事项
 
@@ -66,7 +66,7 @@ node scripts/install-profile.mjs "C:/path/to/profile"
 
 ## 配置
 
-在支持的 Web 宿主中，进入「插件 → dsh-memory-gate」查看「记忆闸门」卡片；旧版分支使用「设置 → 插件 → 插件配置」槽位。这里描述的是源码实现的 UI，**不是本次浏览器渲染验收结果**。
+在支持的 Web 宿主中，进入「插件 → dsh-memory-header-gate」查看「记忆闸门」卡片；旧版分支使用「设置 → 插件 → 插件配置」槽位。这里描述的是源码实现的 UI，**不是本次浏览器渲染验收结果**。
 
 | 字段 | 默认值 | 用途 |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ node scripts/install-profile.mjs "C:/path/to/profile"
 
 ```yaml
 - id: memory-gate
-  name: dsh-memory-gate
+  name: dsh-memory-header-gate
   config:
     identities:
       - id: example-worker

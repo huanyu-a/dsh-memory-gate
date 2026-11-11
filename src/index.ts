@@ -1,5 +1,5 @@
 /**
- * Host half of dsh-memory-gate.
+ * Host half of dsh-memory-header-gate.
  *
  * Two jobs:
  *   1. Own the `memory-gate` configuration: named memory identities (the
@@ -22,7 +22,7 @@
  * and a `Headers.set`; disk writes are debounced, and every failure degrades to
  * "send no identity headers" — the model call itself is never at stake.
  *
- * @module dsh-memory-gate
+ * @module dsh-memory-header-gate
  */
 
 import type { Context } from '@deepseek-ai/cordis'

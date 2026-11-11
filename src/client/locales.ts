@@ -3,7 +3,7 @@
  * derived from the English dictionary; the Chinese dictionary must cover
  * exactly the same keys (compile-time checked).
  *
- * @module dsh-memory-gate/client/locales
+ * @module dsh-memory-header-gate/client/locales
  */
 
 const en = {

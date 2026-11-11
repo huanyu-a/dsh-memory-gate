@@ -1,5 +1,5 @@
 {
-  "name": "dsh-memory-gate",
+  "name": "dsh-memory-header-gate",
   "version": "0.1.0",
   "description": "Per-model, per-session header gate for DeepSeek Harness pi-ai inference requests: stamps configurable headers on calls to trusted origins and pins each session's first decision. Ships configured for the TDAI memory proxy's identity headers (x-team-id / x-agent-id / x-task-id); header names, values and trusted origins are all configurable.",
   "icon": "./icon.svg",

@@ -17,7 +17,7 @@
  * request of that session reuses it verbatim. Configuration changes take
  * effect on new sessions only.
  *
- * @module dsh-memory-gate/gate
+ * @module dsh-memory-header-gate/gate
  */
 
 import {

@@ -6,7 +6,7 @@
  * indistinguishable from the shipped ones. Class names use the `mg-` prefix
  * (CSS-module hashes are per-package and cannot be reused).
  *
- * @module dsh-memory-gate/client/styles
+ * @module dsh-memory-header-gate/client/styles
  */
 
 export const STYLES = `

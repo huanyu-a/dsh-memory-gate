@@ -1,7 +1,7 @@
 /**
  * Plugin-wide constants shared by the host and browser halves.
  *
- * @module dsh-memory-gate/constants
+ * @module dsh-memory-header-gate/constants
  */
 
 /**
@@ -10,7 +10,7 @@
  * `memory-gate` instead — see that file for why the row id carries the
  * settings-namespace continuity.
  */
-export const PLUGIN_ID = 'dsh-memory-gate'
+export const PLUGIN_ID = 'dsh-memory-header-gate'
 
 /**
  * The settings namespace this plugin OWNS: the named memory identities,

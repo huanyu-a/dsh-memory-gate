@@ -6,7 +6,7 @@
  * Choosing one writes the pick onto the model's pi-ai settings row; Default
  * removes it.
  *
- * @module dsh-memory-gate/client/ModelGateSelect
+ * @module dsh-memory-header-gate/client/ModelGateSelect
  */
 
 import { useEffect, useId, useRef, useState } from 'react'
@@ -84,7 +84,7 @@ function ModelGatePicker(props: ModelGateSelectProps): ReactNode {
     const reportFailure = (error: string): void => {
       if (!active.current) return
       setFailed(error)
-      console.error(`[dsh-memory-gate] pick write failed for "${props.route}/${props.modelId}": ${error}`)
+      console.error(`[dsh-memory-header-gate] pick write failed for "${props.route}/${props.modelId}": ${error}`)
     }
     try {
       const reply = await props.onPick(props.route, props.modelId, next === '' ? null : next)

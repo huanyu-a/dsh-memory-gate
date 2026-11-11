@@ -6,10 +6,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 const gate = fileURLToPath(new URL('./release-gate.mjs', import.meta.url))
-function runGate({ status = 200, body = { name: 'dsh-memory-gate', versions: {}, 'dist-tags': { latest: '0.0.9' } }, version = '0.1.0', tag = `v${version}` } = {}) {
+function runGate({ status = 200, body = { name: 'dsh-memory-header-gate', versions: {}, 'dist-tags': { latest: '0.0.9' } }, version = '0.1.0', tag = `v${version}` } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'memory-gate-release-gate-'))
   try {
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'dsh-memory-gate', version }))
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'dsh-memory-header-gate', version }))
     const output = join(root, 'output')
     writeFileSync(output, '')
     const mock = `globalThis.fetch = async () => new Response(${JSON.stringify(JSON.stringify(body))}, {status:${status}})`
@@ -27,7 +27,7 @@ test('real release entry accepts package 404 and writes stable outputs', () => {
 test('real release entry rejects registry failures, malformed data and an existing version', () => {
   for (const input of [
     { status: 500 }, { body: {} },
-    { body: { name: 'dsh-memory-gate', versions: { '0.1.0': {} }, 'dist-tags': {} } },
+    { body: { name: 'dsh-memory-header-gate', versions: { '0.1.0': {} }, 'dist-tags': {} } },
   ]) {
     const result = runGate(input)
     assert.notEqual(result.status, 0)

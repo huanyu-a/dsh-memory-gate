@@ -4,7 +4,7 @@
  * model row, and replacing the owned memory-gate section. Pure logic — no
  * React, no DOM — so it stays unit-testable in isolation.
  *
- * @module dsh-memory-gate/client/ops
+ * @module dsh-memory-header-gate/client/ops
  */
 
 import { DSH_SESSION_HEADER, MEMORY_GATE_FIELD, MEMORY_GATE_NS, PI_AI_NS } from '../constants.js'
