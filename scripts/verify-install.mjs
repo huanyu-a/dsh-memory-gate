@@ -60,6 +60,24 @@ await check('manifest lists the bundle', () => {
   return [present, present ? 'registered' : 'not registered']
 })
 
+// The profile's own patch is what tells the host which package backs the row.
+// Renaming the package without rewriting this row leaves the host loading a
+// package that no longer exists: the bundle is listed, the files are installed,
+// and nothing works — the failure surfaces only as a silent absence at runtime.
+await check('profile patch names this package', () => {
+  const file = join(profile, 'cordis.patch.yml')
+  // A profile that carries no patch of its own is not a failure: the bundle can
+  // still supply its row. Only a patch that names a *different* dsh-memory
+  // package proves a rename left the row pointing at something uninstalled.
+  if (!existsSync(file)) return [true, 'no profile patch (bundle supplies its row)']
+  const body = readFileSync(file, 'utf8')
+  // Row ids differ from package names, so match the `name:` lines only.
+  const declared = [...body.matchAll(/^\s*name:\s*(\S+)\s*$/gm)].map(match => match[1])
+  const stale = declared.filter(name => name.startsWith('dsh-memory') && name !== pkg.name)
+  if (stale.length > 0) return [false, `stale package name(s): ${stale.join(', ')}`]
+  return [true, declared.includes(pkg.name) ? 'row declares this package' : 'no conflicting row']
+})
+
 // The decisive check: both halves must carry markers that only the new build
 // has. Version-stamp comparison cannot distinguish the two builds.
 await check('host half is the new build', () => {

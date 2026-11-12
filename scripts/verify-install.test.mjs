@@ -12,7 +12,7 @@ const script = join(import.meta.dirname, 'verify-install.mjs')
 const libDir = join(import.meta.dirname, '..', 'lib')
 
 /** A profile that looks like a completed install of the given halves. */
-function makeProfile({ hostMarkers = true, clientMarkers = true, bundle = true } = {}) {
+function makeProfile({ hostMarkers = true, clientMarkers = true, bundle = true, patch = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mg-verify-'))
   const profile = join(root, 'profile')
   const installed = join(profile, 'node_modules', 'dsh-memory-header-gate')
@@ -24,6 +24,8 @@ function makeProfile({ hostMarkers = true, clientMarkers = true, bundle = true }
   }))
   writeFileSync(join(profile, 'pnpm-lock.yaml'), 'importers:\n  .:\n    dependencies:\n      "dsh-memory-header-gate@file:x": {}\n')
   writeFileSync(join(installed, 'package.json'), JSON.stringify({ name: 'dsh-memory-header-gate', version: '0.1.0' }))
+  // An optional profile-level patch, as the desktop profile carries.
+  if (patch !== null) writeFileSync(join(profile, 'cordis.patch.yml'), patch)
   // The real artifacts, optionally stripped back to the old build's shape.
   const host = hostMarkers
     ? 'trustedOrigins removeHeaderNames migratedAt name-reserved name-conflict name-duplicate'
@@ -51,7 +53,7 @@ test('passes only when both halves carry the new markers', () => {
   try {
     const { code, out } = verify(profile, [`--storage=${join(root, 'storage')}`])
     assert.equal(code, 0, out)
-    assert.match(out, /8\/8 checks passed/)
+    assert.match(out, /9\/9 checks passed/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -118,4 +120,30 @@ test('reports a missing profile instead of throwing', () => {
   const { code, out } = verify(join(tmpdir(), 'mg-verify-does-not-exist'), ['--storage=' + join(tmpdir(), 'mg-none')])
   assert.equal(code, 1)
   assert.match(out, /FAIL {2}profile is a DSH profile/)
+})
+
+test('fails when the profile patch still names the old package', () => {
+  // The rename left the profile's row pointing at a package that no longer
+  // exists. Everything else looked installed, and the host simply loaded
+  // nothing — a silent failure that only the patch name reveals.
+  const { root, profile } = makeProfile({ patch: '- id: memory-gate\n  name: dsh-memory-gate\n  config: {}\n' })
+  try {
+    const { code, out } = verify(profile, [`--storage=${join(root, 'storage')}`])
+    assert.equal(code, 1)
+    assert.match(out, /FAIL {2}profile patch names this package/)
+    assert.match(out, /stale package name\(s\): dsh-memory-gate/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('passes when the profile patch names this package', () => {
+  const { root, profile } = makeProfile({ patch: '- id: memory-gate\n  name: dsh-memory-header-gate\n  config: {}\n' })
+  try {
+    const { code, out } = verify(profile, [`--storage=${join(root, 'storage')}`])
+    assert.equal(code, 0, out)
+    assert.match(out, /PASS {2}profile patch names this package/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
