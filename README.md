@@ -28,15 +28,21 @@
 
 需要 Node `^22.19.0 || >=24`。当前[清单](<package.json>)的精确 CI cohort 是 DSH `0.2.2-rc.1`、Cordis `4.1.0`、Schemastery `3.19.0`。peer 范围及源码中的旧版分支不是所有版本均已实测的承诺。
 
-### 构建与普通 profile 安装
+### 安装到普通 profile
 
-在仓库根目录执行；把示例 profile 和版本替换成实际值：
+包已发布到 npm，直接从 registry 安装；把示例 profile 替换成实际值：
+
+```sh
+dsh plugin --profile my-profile add dsh-memory-header-gate
+```
+
+需要离线安装时，在仓库根目录构建并打包：
 
 ```sh
 npm ci --legacy-peer-deps=false
 npm run build
 npm pack --ignore-scripts
-dsh plugin --profile my-profile add ./dsh-memory-header-gate-0.1.0.tgz
+dsh plugin --profile my-profile add ./dsh-memory-header-gate-0.1.1.tgz
 ```
 
 包内[组合补丁](<cordis.patch.yml>)注册 `memory-gate` 行，包名为 `dsh-memory-header-gate`。由宿主加载 host/client；不要把源码目录用 `link:` 接入真实 profile，以免解析到开发依赖副本。升级沿用该 profile 的包管理方式，并确认使用的是新 tarball，而不是旧缓存。

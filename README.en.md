@@ -28,15 +28,21 @@ Step-by-step desktop-profile runbook (exit check, backup, post-install fingerpri
 
 Requires Node `^22.19.0 || >=24`. The exact CI cohort declared in the [manifest](<package.json>) is DSH `0.2.2-rc.1`, Cordis `4.1.0`, and Schemastery `3.19.0`. Peer ranges and legacy source branches are not evidence that every matching version has been tested.
 
-### Build and install into a regular profile
+### Install into a regular profile
 
-Run from the repository root; replace the example profile/version as needed:
+The package is published to npm, so install it straight from the registry; replace the example profile as needed:
+
+```sh
+dsh plugin --profile my-profile add dsh-memory-header-gate
+```
+
+For an offline install, build and pack from the repository root:
 
 ```sh
 npm ci --legacy-peer-deps=false
 npm run build
 npm pack --ignore-scripts
-dsh plugin --profile my-profile add ./dsh-memory-header-gate-0.1.0.tgz
+dsh plugin --profile my-profile add ./dsh-memory-header-gate-0.1.1.tgz
 ```
 
 The bundled [composition patch](<cordis.patch.yml>) registers the `memory-gate` row under package name `dsh-memory-header-gate`. The host loads both halves. Avoid `link:` dependencies in a real profile: they may resolve development dependency copies. Upgrade through the profile's existing package-management mechanism and confirm it consumes the fresh tarball rather than a cached extraction.
