@@ -39,10 +39,16 @@ await check('plugin is installed', () => {
   return [manifest.name === pkg.name, `${String(manifest.name)}@${String(manifest.version)}`]
 })
 
-await check('manifest depends on the local tarball', () => {
+await check('manifest depends on the plugin', () => {
   const manifest = JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8'))
   const spec = manifest?.dependencies?.[pkg.name]
-  return [typeof spec === 'string' && spec.startsWith('file:'), String(spec ?? 'absent')]
+  if (typeof spec !== 'string') return [false, String(spec ?? 'absent')]
+  // Both installation routes are legitimate: a local tarball (`file:`) or the
+  // npm registry (a semver range). Only reject a specifier that points at
+  // something else — a stale name or a link: dependency.
+  const local = spec.startsWith('file:')
+  const registry = /^[~^]?\d+\.\d+\.\d+/.test(spec)
+  return [local || registry, local ? `local tarball (${spec})` : `registry (${spec})`]
 })
 
 await check('manifest lists the bundle', () => {
@@ -82,10 +88,15 @@ await check('client half is the new build', () => {
   return [missing.length === 0, missing.length === 0 ? 'wrapper intact, new markers present' : `wrapper intact but missing ${missing.join(', ')}`]
 })
 
-await check('lockfile records the local tarball', () => {
+await check('lockfile records the plugin', () => {
   const file = join(profile, 'pnpm-lock.yaml')
   if (!existsSync(file)) return [false, 'pnpm-lock.yaml missing']
-  return [readFileSync(file, 'utf8').includes(`${pkg.name}@file:`), 'importer record present']
+  const body = readFileSync(file, 'utf8')
+  // A `file:` install is recorded as `<name>@file:<tarball>`; a registry install
+  // as `<name>@<version>`. Either form proves the importer entry exists, which is
+  // what this check is for.
+  const recorded = body.includes(`${pkg.name}@file:`) || new RegExp(`\\b${pkg.name.replaceAll('-', '\\-')}@\\d+\\.\\d+\\.\\d+`).test(body)
+  return [recorded, 'importer record present']
 })
 
 await check('pin store is readable', async () => {
